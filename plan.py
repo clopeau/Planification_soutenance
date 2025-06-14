@@ -1067,6 +1067,9 @@ with st.sidebar:
     st.write(
         "Système de planification automatique utilisant l'algorithme de glouton ou génétique pour respecter toutes les contraintes.")
 
----
-© 2024-2025 - Polytech 4A MAM
+    # Ajouter cette ligne pour afficher la ligne horizontale et le copyright
+    st.markdown("""
+    ---
+    © 2024-2025 - Polytech 4A MAM
 """)
+
