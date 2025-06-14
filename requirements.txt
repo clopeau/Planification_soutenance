@@ -1,2 +1,6 @@
+streamlit
+pandas
 plotly
 networkx
+numpy
+openpyxl
