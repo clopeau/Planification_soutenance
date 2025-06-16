@@ -433,6 +433,8 @@ class PlanificationOptimiseeV2:
         self.tuteurs_referents = list(set([e["Tuteur"] for e in self.etudiants]))
         self.tous_jurys = list(set(self.tuteurs_referents + self.co_jurys))
         self.charge_jurys = {jury: 0 for jury in self.tous_jurys}
+        self.charge_jurys_cojury = {jury: 0 for jury in self.tous_jurys}
+        
 
     def generer_creneaux_uniques(self):
         creneaux = []
@@ -473,6 +475,19 @@ class PlanificationOptimiseeV2:
             if jury != tuteur_referent and self.est_disponible(jury, jour_str_app, heure_str_app):
                 co_jurys_dispo.append(jury)
         co_jurys_dispo.sort(key=lambda x: self.charge_jurys.get(x, 0)) # Utiliser get pour éviter KeyError si charge non init
+        
+        def sort_key_balance_roles(jury_candidat):
+            nb_tutorats = self.charge_jurys_tuteur.get(jury_candidat, 0)
+            nb_cojury = self.charge_jurys_cojury.get(jury_candidat, 0)
+            difference_roles = nb_tutorats - nb_cojury # Positif si plus de tutorats
+            charge_totale = self.charge_jurys.get(jury_candidat, 0) # Charge totale combinée
+    
+            # On veut prioriser ceux pour qui difference_roles est grande (besoin d'être co-jury)
+            # donc on trie par -difference_roles (décroissant)
+            # et ensuite par charge_totale (croissant)
+            return (-difference_roles, charge_totale)
+
+        co_jurys_dispo.sort(key=sort_key_balance_roles)
         return co_jurys_dispo
 
     def optimiser_planning_ameliore(self):
@@ -517,8 +532,8 @@ class PlanificationOptimiseeV2:
                     creneaux_occupes_ids.add(creneau_obj['id'])
                     jurys_par_moment_app[creneau_obj['moment']].add(tuteur_ref)
                     jurys_par_moment_app[creneau_obj['moment']].add(co_jury_choisi_final)
-                    self.charge_jurys[tuteur_ref] = self.charge_jurys.get(tuteur_ref, 0) + 1
-                    self.charge_jurys[co_jury_choisi_final] = self.charge_jurys.get(co_jury_choisi_final, 0) + 1
+                    self.charge_jurys_tuteur[tuteur_ref] = self.charge_jurys_tuteur.get(tuteur_ref, 0) + 1
+                    self.charge_jurys_cojury[co_jury_choisi_final] = self.charge_jurys_cojury.get(co_jury_choisi_final, 0) + 1
                     soutenance_planifiee_etu = True
                     break
             tentatives_par_etudiant.append(tentatives_etu)
