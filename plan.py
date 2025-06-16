@@ -67,6 +67,7 @@ if "duree_soutenance" not in st.session_state:
 if "horaires_par_jour" not in st.session_state: # Ajout pour éviter erreur si on navigue direct
     st.session_state.horaires_par_jour = {}
 
+# ... (début du fichier identique) ...
 
 @dataclass
 class Individu:
@@ -77,7 +78,7 @@ class Individu:
     conflits: int = 0
 
 
-class AlgorithmeGenetique:
+class AlgorithmeGenetique: # Début de la classe
     def __init__(self, planificateur, taille_population=80, nb_generations=800,
                  taux_mutation=0.12, taux_croisement=0.8):
         self.planificateur = planificateur
@@ -88,13 +89,15 @@ class AlgorithmeGenetique:
 
         self.creneaux = planificateur.generer_creneaux_uniques()
         self.creneaux_valides_par_etudiant = self._precalculer_creneaux_valides()
-        self.nb_etudiants = len(planificateur.etudiants)
+        self.nb_etudiants = len(planificateur.etudiants) if planificateur.etudiants else 0 # S'assurer que planificateur.etudiants n'est pas None
 
         self.historique_fitness = []
         self.meilleure_solution = None
 
     def _precalculer_creneaux_valides(self):
         creneaux_valides = {}
+        if not self.planificateur.etudiants: # Ajout de garde
+            return creneaux_valides
         for idx_etu, etudiant in enumerate(self.planificateur.etudiants):
             tuteur = etudiant["Tuteur"]
             creneaux_possibles = []
@@ -110,32 +113,49 @@ class AlgorithmeGenetique:
 
     def generer_individu_intelligent(self) -> Individu:
         genes = [-1] * self.nb_etudiants
+        if self.nb_etudiants == 0: # Ajout de garde
+            return Individu(genes=genes)
+            
         creneaux_occupes = set()
-        jurys_par_moment = {}
+        jurys_par_moment = {} # {moment_str: {jury1, jury2}}
         ordre_etudiants = list(range(self.nb_etudiants))
         random.shuffle(ordre_etudiants)
 
         for idx_etu in ordre_etudiants:
-            creneaux_possibles = self.creneaux_valides_par_etudiant.get(idx_etu, []).copy()
+            # S'assurer que self.planificateur.etudiants[idx_etu] est accessible
+            if idx_etu >= len(self.planificateur.etudiants): continue
+
+            creneaux_possibles_etu = self.creneaux_valides_par_etudiant.get(idx_etu, [])
+            creneaux_possibles = creneaux_possibles_etu.copy()
             random.shuffle(creneaux_possibles)
+
             for idx_creneau in creneaux_possibles:
+                # S'assurer que self.creneaux[idx_creneau] est accessible
+                if idx_creneau >= len(self.creneaux): continue
                 creneau = self.creneaux[idx_creneau]
+
                 if idx_creneau in creneaux_occupes:
                     continue
+                
                 tuteur = self.planificateur.etudiants[idx_etu]["Tuteur"]
                 moment = creneau['moment']
+
                 if moment not in jurys_par_moment:
                     jurys_par_moment[moment] = set()
+                
                 if tuteur in jurys_par_moment[moment]:
                     continue
+
                 co_jurys_disponibles = self.planificateur.trouver_co_jurys_disponibles(
                     tuteur, creneau['jour'], creneau['heure']
                 )
                 co_jury_libre = None
-                for co_jury in co_jurys_disponibles:
-                    if co_jury not in jurys_par_moment[moment]:
-                        co_jury_libre = co_jury
+                random.shuffle(co_jurys_disponibles) # Introduire de l'aléatoire dans le choix du co-jury
+                for co_jury_cand in co_jurys_disponibles:
+                    if co_jury_cand not in jurys_par_moment[moment]:
+                        co_jury_libre = co_jury_cand
                         break
+                
                 if co_jury_libre:
                     genes[idx_etu] = idx_creneau
                     creneaux_occupes.add(idx_creneau)
@@ -144,216 +164,322 @@ class AlgorithmeGenetique:
                     break
         return Individu(genes=genes)
 
-    # Dans AlgorithmeGenetique.calculer_fitness_amelioree
-def calculer_fitness_amelioree(self, individu: Individu) -> Individu:
-    planning = self.decoder_individu(individu)
+    # LA FONCTION EST MAINTENANT CORRECTEMENT INDENTÉE DANS LA CLASSE
+    def calculer_fitness_amelioree(self, individu: Individu) -> Individu:
+        planning = self.decoder_individu(individu)
 
-    # ... (calculs existants : nb_soutenances, taux_planification, conflits, equilibrage, bonus_alternance) ...
+        nb_soutenances = len(planning)
+        nb_total_etudiants = self.nb_etudiants # Utiliser self.nb_etudiants qui est initialisé
+        taux_planification = nb_soutenances / nb_total_etudiants if nb_total_etudiants > 0 else 0
 
-    # NOUVEAU: Calculer la balance Tuteur/Co-jury
-    roles_par_jury = defaultdict(lambda: {'tuteur': 0, 'cojury': 0})
-    for soutenance in planning:
-        roles_par_jury[soutenance['Tuteur']]['tuteur'] += 1
-        roles_par_jury[soutenance['Co-jury']]['cojury'] += 1
+        conflits_salle, conflits_jury_fitness = self._analyser_conflits_detailles(planning)
+        total_conflits = conflits_salle + conflits_jury_fitness
 
-    penalite_balance_roles = 0
-    score_balance_roles = 0 # Score positif si bien balancé
-    nb_jurys_concernes = 0
+        equilibrage = self._calculer_equilibrage_charge(planning)
+        bonus_alternance = self._calculer_bonus_alternance(planning)
 
-    # On ne pénalise que les tuteurs référents pour cette règle (les co-jurys purs n'ont pas de "tuteurages")
-    # ou tous les jurys si on veut une balance stricte pour tous.
-    # Ici, on se concentre sur les personnes qui sont à la fois tuteurs et peuvent être co-jurys.
-    personnes_concernées_par_balance = set(self.planificateur.tuteurs_referents) & set(self.planificateur.co_jurys)
-    # Ou plus simplement, tous ceux qui apparaissent dans roles_par_jury :
-    # personnes_concernées_par_balance = roles_par_jury.keys()
+        # NOUVEAU: Calculer la balance Tuteur/Co-jury
+        roles_par_jury = defaultdict(lambda: {'tuteur': 0, 'cojury': 0})
+        for soutenance in planning:
+            roles_par_jury[soutenance['Tuteur']]['tuteur'] += 1
+            roles_par_jury[soutenance['Co-jury']]['cojury'] += 1
 
+        penalite_balance_roles = 0
+        score_balance_roles = 0 
+        
+        # Personnes qui peuvent être à la fois tuteur et co-jury
+        personnes_eligibles_balance = set(self.planificateur.tuteurs_referents) & set(self.planificateur.co_jurys)
 
-    for jury, counts in roles_par_jury.items():
-        # Appliquer cette règle spécifiquement aux personnes qui sont désignées comme tuteurs d'étudiants
-        # ET qui sont aussi dans la liste des co-jurys potentiels.
-        # Les purs co-jurys (qui ne sont jamais tuteurs) ne sont pas concernés par cette "balance".
-        if jury in self.planificateur.tuteurs_referents and jury in self.planificateur.co_jurys:
-            nb_jurys_concernes +=1
-            difference = abs(counts['tuteur'] - counts['cojury'])
-            penalite_balance_roles += difference * 100 # Pénalité forte par unité de différence
-            
-            # Bonus si parfaitement équilibré (ou presque)
-            if difference <= 1: # Permettre une petite marge
-                score_balance_roles += 50
-            elif difference == 0:
-                score_balance_roles += 100
+        for jury, counts in roles_par_jury.items():
+            if jury in personnes_eligibles_balance:
+                difference = abs(counts['tuteur'] - counts['cojury'])
+                # Pénalité proportionnelle au carré de la différence pour accentuer les grands écarts
+                penalite_balance_roles += (difference ** 2) * 20 # Ajuster le poids (ex: 20)
+                
+                if difference == 0:
+                    score_balance_roles += 100 # Fort bonus pour équilibre parfait
+                elif difference == 1:
+                    score_balance_roles += 30  # Bonus plus faible pour un écart de 1
 
+        # Fonction de fitness (à maximiser)
+        fitness = (
+                taux_planification * 1000 +
+                max(0, (nb_soutenances - (nb_total_etudiants * 0.75))) * 50 + # Bonus si on planifie > 75%
+                equilibrage * 30 +  # Augmenter un peu le poids de l'équilibrage
+                bonus_alternance * 15 + # Augmenter un peu le poids de l'alternance
+                score_balance_roles * 1.5 - # Bonus pour la balance des rôles, ajuster poids
+                total_conflits * 1000 -  # Pénalité massive pour conflits
+                (nb_total_etudiants - nb_soutenances) * 150 - # Pénalité pour non-planifiés
+                penalite_balance_roles # Pénalité pour déséquilibre des rôles
+        )
+        
+        if total_conflits == 0 and nb_soutenances >= nb_total_etudiants * 0.9: # Si >90% planifié sans conflit
+            fitness += 2000 # Bonus significatif
 
-    # Ajuster la fonction de fitness
-    fitness = (
-            taux_planification * 1000 +
-            max(0, (nb_soutenances - 20)) * 50 +
-            equilibrage * 20 +  # Équilibrage global déjà présent
-            bonus_alternance * 10 -
-            total_conflits * 500 -
-            (nb_total - nb_soutenances) * 100 -
-            penalite_balance_roles + # Ajouter la nouvelle pénalité
-            score_balance_roles # Ajouter le nouveau bonus
-    )
-    # ... (reste de la fonction) ...
-    return individu
+        individu.fitness = fitness
+        individu.soutenances_planifiees = nb_soutenances
+        individu.conflits = total_conflits
+        return individu
 
     def _analyser_conflits_detailles(self, planning):
         conflits_salle = 0
         conflits_jury = 0
-        creneaux_salle = {}
-        jurys_par_moment = {}
+        creneaux_salle = {} # key: "jour_heure_salle", value: True
+        jurys_par_moment = {} # key: "jour_heure", value: set of jurys
+
         for soutenance in planning:
             cle_salle = f"{soutenance['Jour']}_{soutenance['Créneau']}_{soutenance['Salle']}"
             moment = f"{soutenance['Jour']}_{soutenance['Créneau']}"
+
             if cle_salle in creneaux_salle:
                 conflits_salle += 1
             creneaux_salle[cle_salle] = True
+
             if moment not in jurys_par_moment:
                 jurys_par_moment[moment] = set()
+
             tuteur = soutenance['Tuteur']
             co_jury = soutenance['Co-jury']
+
+            # Un tuteur ne peut pas être à deux endroits en même temps
             if tuteur in jurys_par_moment[moment]:
                 conflits_jury += 1
-            if co_jury in jurys_par_moment[moment]: # Peut-être redondant si tuteur != co-jury est assuré
+            else:
+                jurys_par_moment[moment].add(tuteur)
+            
+            # Un co-jury ne peut pas être à deux endroits en même temps
+            # et ne peut pas être le tuteur de la même soutenance (géré par la logique de sélection)
+            if co_jury in jurys_par_moment[moment]:
+                # Si le co-jury est le même que le tuteur et qu'on a déjà compté le conflit pour le tuteur,
+                # on pourrait compter double. Mais ici, on ajoute au set, donc pas de double comptage si tuteur=cojury
+                # Cependant, la logique de sélection de co-jury devrait empêcher tuteur == co-jury.
                 conflits_jury += 1
-            jurys_par_moment[moment].add(tuteur)
-            jurys_par_moment[moment].add(co_jury)
+            else:
+                jurys_par_moment[moment].add(co_jury)
+                
         return conflits_salle, conflits_jury
 
-    def _calculer_equilibrage_charge(self, planning):
+    # ... (les autres méthodes de AlgorithmeGenetique : _calculer_equilibrage_charge, _calculer_bonus_alternance,
+    #      croisement_intelligent, mutation_adaptative, evoluer, selection_tournament, decoder_individu
+    #      restent indentées comme méthodes de cette classe) ...
+    def _calculer_equilibrage_charge(self, planning): # Doit être une méthode
         if not planning: return 0
-        charges = {}
+        charges = defaultdict(int)
         for soutenance in planning:
-            tuteur = soutenance['Tuteur']
-            co_jury = soutenance['Co-jury']
-            charges[tuteur] = charges.get(tuteur, 0) + 1
-            charges[co_jury] = charges.get(co_jury, 0) + 1
-        if len(charges) <= 1: return 0
+            charges[soutenance['Tuteur']] += 1
+            charges[soutenance['Co-jury']] += 1
+        
+        if not charges or len(charges) <= 1 : return 10 # Score max si peu de jurys ou pas de planning
+        
         valeurs_charges = list(charges.values())
-        moyenne = sum(valeurs_charges) / len(valeurs_charges)
-        variance = sum((x - moyenne) ** 2 for x in valeurs_charges) / len(valeurs_charges)
-        return max(0, 10 - variance) # Score inversement proportionnel
+        moyenne = np.mean(valeurs_charges)
+        variance = np.var(valeurs_charges)
+        # Score inversement proportionnel à la variance, borné
+        # Plus la variance est faible, meilleur est le score. Max 10.
+        return max(0, 10 - np.sqrt(variance)) # Utiliser racine carrée pour modérer l'impact de la variance
 
-    def _calculer_bonus_alternance(self, planning):
+    def _calculer_bonus_alternance(self, planning): # Doit être une méthode
         bonus = 0
-        jurys_par_periode = {'matin': set(), 'apres_midi': set()}
+        jurys_par_periode = {'matin': defaultdict(set), 'apres_midi': defaultdict(set)} # {periode: {jour: {jury1, ...}}}
+        
         for soutenance in planning:
-            debut = soutenance['Début']
-            periode = 'matin' if debut.hour < 14 else 'apres_midi'
-            jurys_par_periode[periode].add(soutenance['Tuteur'])
-            jurys_par_periode[periode].add(soutenance['Co-jury'])
-        jurys_equilibres = jurys_par_periode['matin'] & jurys_par_periode['apres_midi']
-        bonus += len(jurys_equilibres) * 2
-        return bonus
+            jour = soutenance['Jour']
+            debut_heure = soutenance['Début'].hour
+            periode = 'matin' if debut_heure < 13 else 'apres_midi' # 13h comme limite pour matin
 
-    def croisement_intelligent(self, parent1: Individu, parent2: Individu) -> Tuple[Individu, Individu]:
-        enfant1_genes = [-1] * len(parent1.genes)
-        enfant2_genes = [-1] * len(parent2.genes)
-        point_croisement = random.randint(1, len(parent1.genes) - 1)
+            jurys_par_periode[periode][jour].add(soutenance['Tuteur'])
+            jurys_par_periode[periode][jour].add(soutenance['Co-jury'])
+
+        total_jurys_alternant = 0
+        jours_concernes = set(jurys_par_periode['matin'].keys()) | set(jurys_par_periode['apres_midi'].keys())
+
+        for jour_alternance in jours_concernes:
+            jurys_matin_ce_jour = jurys_par_periode['matin'].get(jour_alternance, set())
+            jurys_aprem_ce_jour = jurys_par_periode['apres_midi'].get(jour_alternance, set())
+            jurys_alternant_ce_jour = jurys_matin_ce_jour & jurys_aprem_ce_jour
+            total_jurys_alternant += len(jurys_alternant_ce_jour)
+            
+        # Bonus proportionnel au nombre de jurys qui ont des soutenances matin ET après-midi (sur différents jours potentiellement)
+        # Ou un bonus par jour où il y a une bonne alternance.
+        # Ici, on compte le nombre total d'instances de jury alternant sur un jour.
+        return total_jurys_alternant * 1 # Ajuster le poids du bonus
+
+    def croisement_intelligent(self, parent1: Individu, parent2: Individu) -> Tuple[Individu, Individu]: # Doit être une méthode
+        len_genes = len(parent1.genes)
+        if len_genes == 0: # Garde si les parents sont vides
+             return Individu(genes=[]), Individu(genes=[])
+
+        enfant1_genes = [-1] * len_genes
+        enfant2_genes = [-1] * len_genes
+        
+        # S'assurer que le point de croisement est valide même si len_genes est petit
+        point_croisement = random.randint(0, len_genes -1) if len_genes > 0 else 0
+
+
+        # Copier la première partie
         for i in range(point_croisement):
             enfant1_genes[i] = parent1.genes[i]
             enfant2_genes[i] = parent2.genes[i]
+
+        # Gérer les créneaux déjà utilisés dans la première partie des enfants
         creneaux_utilises_e1 = set(g for g in enfant1_genes[:point_croisement] if g != -1)
         creneaux_utilises_e2 = set(g for g in enfant2_genes[:point_croisement] if g != -1)
-        for i in range(point_croisement, len(parent1.genes)):
-            if parent2.genes[i] != -1 and parent2.genes[i] not in creneaux_utilises_e1:
-                enfant1_genes[i] = parent2.genes[i]
-                creneaux_utilises_e1.add(parent2.genes[i])
-            if parent1.genes[i] != -1 and parent1.genes[i] not in creneaux_utilises_e2:
-                enfant2_genes[i] = parent1.genes[i]
-                creneaux_utilises_e2.add(parent1.genes[i])
+
+        # Pour la deuxième partie, essayer de prendre de l'autre parent en évitant les doublons de créneaux
+        # et en s'assurant que l'étudiant à cet index peut bien prendre le créneau de l'autre parent.
+        for i in range(point_croisement, len_genes):
+            # Pour enfant1, envisager gene de parent2
+            gene_p2 = parent2.genes[i]
+            if gene_p2 != -1 and gene_p2 not in creneaux_utilises_e1 and \
+               (i in self.creneaux_valides_par_etudiant and gene_p2 in self.creneaux_valides_par_etudiant[i]):
+                enfant1_genes[i] = gene_p2
+                creneaux_utilises_e1.add(gene_p2)
+            else: # Sinon, essayer de garder le gene du parent1 s'il est valide et non utilisé
+                gene_p1_part2 = parent1.genes[i]
+                if gene_p1_part2 != -1 and gene_p1_part2 not in creneaux_utilises_e1 and \
+                   (i in self.creneaux_valides_par_etudiant and gene_p1_part2 in self.creneaux_valides_par_etudiant[i]):
+                    enfant1_genes[i] = gene_p1_part2
+                    creneaux_utilises_e1.add(gene_p1_part2)
+
+
+            # Pour enfant2, envisager gene de parent1
+            gene_p1 = parent1.genes[i]
+            if gene_p1 != -1 and gene_p1 not in creneaux_utilises_e2 and \
+               (i in self.creneaux_valides_par_etudiant and gene_p1 in self.creneaux_valides_par_etudiant[i]):
+                enfant2_genes[i] = gene_p1
+                creneaux_utilises_e2.add(gene_p1)
+            else: # Sinon, essayer de garder le gene du parent2 s'il est valide et non utilisé
+                gene_p2_part2 = parent2.genes[i]
+                if gene_p2_part2 != -1 and gene_p2_part2 not in creneaux_utilises_e2 and \
+                   (i in self.creneaux_valides_par_etudiant and gene_p2_part2 in self.creneaux_valides_par_etudiant[i]):
+                    enfant2_genes[i] = gene_p2_part2
+                    creneaux_utilises_e2.add(gene_p2_part2)
+                    
         return Individu(genes=enfant1_genes), Individu(genes=enfant2_genes)
 
-    def mutation_adaptative(self, individu: Individu) -> Individu:
+    def mutation_adaptative(self, individu: Individu) -> Individu: # Doit être une méthode
+        if not individu.genes: return individu # Garde
+
         for i in range(len(individu.genes)):
             if random.random() < self.taux_mutation:
                 creneaux_possibles_etu = self.creneaux_valides_par_etudiant.get(i, [])
                 if not creneaux_possibles_etu: continue
 
-                if individu.genes[i] == -1: # Essayer de planifier un non-planifié
-                    creneaux_libres_pour_mut = [c for c in creneaux_possibles_etu if c not in individu.genes]
-                    if creneaux_libres_pour_mut:
-                        individu.genes[i] = random.choice(creneaux_libres_pour_mut)
-                else: # Essayer de changer vers un autre créneau valide (potentiellement meilleur)
-                    nouveau_creneau = random.choice(creneaux_possibles_etu)
-                    # Accepter si le nouveau créneau est libre ou si c'est le même
-                    # (pour permettre à la fitness de recalculer si d'autres choses ont changé)
-                    if nouveau_creneau not in individu.genes or nouveau_creneau == individu.genes[i]:
-                        individu.genes[i] = nouveau_creneau
+                gene_actuel = individu.genes[i]
+                
+                # Créer un set des gènes actuellement utilisés par d'autres étudiants
+                autres_genes_utilises = set(individu.genes[j] for j in range(len(individu.genes)) if j != i and individu.genes[j] != -1)
+
+                creneaux_libres_pour_mutation = [c for c in creneaux_possibles_etu if c not in autres_genes_utilises]
+
+                if not creneaux_libres_pour_mutation: # Aucun créneau libre valide pour cet étudiant
+                    if gene_actuel != -1 and gene_actuel not in autres_genes_utilises:
+                        # Si l'étudiant est déjà planifié et son créneau est unique, on peut le laisser
+                        # ou essayer de le déplanifier pour libérer son créneau (plus agressif)
+                        # individu.genes[i] = -1 # Optionnel: déplanifier si pas d'autre option
+                        pass 
+                    else: # Si non planifié ou son créneau est déjà pris, et pas d'option, on ne fait rien
+                         individu.genes[i] = -1 # Assurer qu'il est marqué comme non planifié s'il y a conflit
+
+                    continue
+
+                if gene_actuel == -1: # Si l'étudiant n'est pas planifié, essayer de le planifier
+                    individu.genes[i] = random.choice(creneaux_libres_pour_mutation)
+                else: # Sinon, essayer de changer vers un *autre* meilleur créneau libre
+                    # Exclure le créneau actuel des choix pour forcer un changement s'il y a d'autres options
+                    options_changement = [c for c in creneaux_libres_pour_mutation if c != gene_actuel]
+                    if options_changement:
+                        individu.genes[i] = random.choice(options_changement)
+                    # Si la seule option libre est son créneau actuel, on le laisse.
+                    elif gene_actuel in creneaux_libres_pour_mutation : # (ce qui signifie que creneaux_libres_pour_mutation ne contenait que gene_actuel)
+                        individu.genes[i] = gene_actuel 
+                    else: # Cas étrange, l'étudiant est planifié mais son créneau n'est pas dans les libres, conflit potentiel
+                         individu.genes[i] = -1 # Déplanifier pour résoudre
         return individu
 
-    def evoluer(self) -> Tuple[List[Dict], Dict]:
+    def evoluer(self) -> Tuple[List[Dict], Dict]: # Doit être une méthode
         population = []
+        if self.nb_etudiants == 0: # Si pas d'étudiants, pas de population
+             st.warning("AG: Aucun étudiant à planifier, population vide.")
+             return [], {'generations': 0, 'fitness_finale': 0, 'soutenances_planifiees': 0, 'conflits': 0, 'taux_reussite': 0, 'historique': []}
+
         for _ in range(self.taille_population):
             individu = self.generer_individu_intelligent()
             population.append(self.calculer_fitness_amelioree(individu))
 
-        if not population : # Si aucun individu n'a pu être généré (ex: pas de créneaux valides)
-            st.warning("AG: Impossible de générer une population initiale.")
-            return [], {
-                'generations': 0, 'fitness_finale': 0, 'soutenances_planifiees': 0,
-                'conflits': 0, 'taux_reussite': 0, 'historique': [],
-                'amelioration_valeur': 0
-            }
+        if not population :
+            st.warning("AG: Impossible de générer une population initiale viable.")
+            return [], {'generations': 0, 'fitness_finale': 0, 'soutenances_planifiees': 0, 'conflits': 0, 'taux_reussite': 0, 'historique': []}
 
-
-        self.meilleure_solution = max(population, key=lambda x: x.fitness, default=population[0] if population else Individu(genes=[]))
+        self.meilleure_solution = max(population, key=lambda x: x.fitness)
         stagnation = 0
 
         for generation in range(self.nb_generations):
             nouvelle_population = []
             population_triee = sorted(population, key=lambda x: x.fitness, reverse=True)
-            elite_size = max(1, self.taille_population // 10) # Assurer au moins 1 si pop petite
+            
+            elite_size = max(1, int(self.taille_population * 0.1)) # 10% d'élitisme, au moins 1
             nouvelle_population.extend(population_triee[:elite_size])
 
+            # Remplissage de la nouvelle population
             while len(nouvelle_population) < self.taille_population:
                 if random.random() < self.taux_croisement and len(population) >= 2 :
                     parent1 = self.selection_tournament(population, k=5)
                     parent2 = self.selection_tournament(population, k=5)
-                    enfant1, enfant2 = self.croisement_intelligent(parent1, parent2)
-                    enfant1 = self.mutation_adaptative(enfant1)
-                    enfant2 = self.mutation_adaptative(enfant2)
-                    nouvelle_population.extend([enfant1, enfant2])
-                else:
-                    nouvel_individu = self.generer_individu_intelligent()
-                    nouvelle_population.append(nouvel_individu)
+                    if parent1.genes and parent2.genes: # S'assurer que les parents ne sont pas vides
+                        enfant1, enfant2 = self.croisement_intelligent(parent1, parent2)
+                        nouvelle_population.append(self.mutation_adaptative(enfant1))
+                        if len(nouvelle_population) < self.taille_population:
+                             nouvelle_population.append(self.mutation_adaptative(enfant2))
+                else: # Mutation ou immigration
+                    if len(population) > 0:
+                        individu_mute = self.mutation_adaptative(random.choice(population)) # Prendre un individu au hasard pour le muter
+                        nouvelle_population.append(individu_mute)
+                    else: # Si population de base est vide, générer un nouveau
+                         nouvelle_population.append(self.generer_individu_intelligent())
             
-            nouvelle_population = nouvelle_population[:self.taille_population]
+            nouvelle_population = nouvelle_population[:self.taille_population] # S'assurer de la taille
             population = [self.calculer_fitness_amelioree(ind) for ind in nouvelle_population]
 
-            if not population: break # Sortir si la population devient vide
+            if not population: # Si après évaluation, la population est vide (tous fitness inf?)
+                st.warning(f"AG: Population vide à la génération {generation}.")
+                break 
 
-            meilleur_actuel = max(population, key=lambda x: x.fitness, default=self.meilleure_solution)
-            if meilleur_actuel.fitness > self.meilleure_solution.fitness:
-                self.meilleure_solution = meilleur_actuel
+            meilleur_actuel_gen = max(population, key=lambda x: x.fitness, default=self.meilleure_solution)
+
+            if meilleur_actuel_gen.fitness > self.meilleure_solution.fitness:
+                self.meilleure_solution = meilleur_actuel_gen
                 stagnation = 0
             else:
                 stagnation += 1
 
-            if stagnation > 50 and generation < self.nb_generations - 100:
-                nb_nouveaux = self.taille_population // 3
-                nouveaux = [self.generer_individu_intelligent() for _ in range(nb_nouveaux)]
-                population_triee_pour_remplacement = sorted(population, key=lambda x: x.fitness) # Trier par fitness croissante
-                population = population_triee_pour_remplacement[nb_nouveaux:] + nouveaux # Remplacer les moins bons
-                random.shuffle(population) # Mélanger après remplacement
+            # Relance si stagnation (diversification)
+            if stagnation > max(30, self.nb_generations * 0.1) and generation < self.nb_generations * 0.8: # Stagnation sur 10% des gen ou 30
+                nb_a_remplacer = int(self.taille_population * 0.3) # Remplacer 30%
+                population_moins_bons = sorted(population, key=lambda x: x.fitness)[:nb_a_remplacer]
+                population_meilleurs = sorted(population, key=lambda x: x.fitness, reverse=True)[nb_a_remplacer:]
+                
+                nouveaux_individus_gen = [self.generer_individu_intelligent() for _ in range(nb_a_remplacer)]
+                population = population_meilleurs + [self.calculer_fitness_amelioree(n_ind) for n_ind in nouveaux_individus_gen]
+                random.shuffle(population)
                 stagnation = 0
-            
-            fitness_moyenne = sum(ind.fitness for ind in population) / len(population) if population else 0
+                if self.nb_generations > 20 : # Éviter log sur très peu de générations
+                    st.sidebar.text(f"AG: Relance à la gén. {generation}")
+
+
+            fitness_moyenne_gen = np.mean([ind.fitness for ind in population]) if population else 0
             self.historique_fitness.append({
                 'generation': generation,
-                'fitness_max': meilleur_actuel.fitness,
-                'fitness_moyenne': fitness_moyenne,
-                'soutenances_max': meilleur_actuel.soutenances_planifiees,
-                'conflits_min': meilleur_actuel.conflits
+                'fitness_max': self.meilleure_solution.fitness, # Toujours le meilleur global
+                'fitness_moyenne': fitness_moyenne_gen,
+                'soutenances_max': self.meilleure_solution.soutenances_planifiees,
+                'conflits_min': self.meilleure_solution.conflits
             })
-            if generation % (self.nb_generations // 10) == 0: # Affichage partiel
-                 st.sidebar.text(f"Gén: {generation}, FitMax: {meilleur_actuel.fitness:.0f}, Sout: {meilleur_actuel.soutenances_planifiees}")
-
+            if generation % max(1, (self.nb_generations // 20)) == 0: 
+                 st.sidebar.text(f"G:{generation} FitMax:{self.meilleure_solution.fitness:.0f} S:{self.meilleure_solution.soutenances_planifiees} C:{self.meilleure_solution.conflits}")
 
         planning_final = self.decoder_individu(self.meilleure_solution)
         taux_reussite_final = (self.meilleure_solution.soutenances_planifiees / self.nb_etudiants) if self.nb_etudiants > 0 else 0
-
         statistiques = {
             'generations': self.nb_generations,
             'fitness_finale': self.meilleure_solution.fitness,
@@ -364,64 +490,82 @@ def calculer_fitness_amelioree(self, individu: Individu) -> Individu:
         }
         return planning_final, statistiques
 
-    def selection_tournament(self, population: List[Individu], k=3) -> Individu:
+    def selection_tournament(self, population: List[Individu], k=3) -> Individu: # Doit être une méthode
         if not population:
-            return Individu(genes=[]) # Retourner un individu vide si la population est vide
-        participants = random.sample(population, min(k, len(population)))
-        return max(participants, key=lambda x: x.fitness, default=population[0])
+            return Individu(genes=[]) # Cas où la population est vide
+        
+        # S'assurer que k n'est pas plus grand que la taille de la population
+        k_valide = min(k, len(population))
+        if k_valide == 0: # Si la population devient vide après le min(k, len)
+             return population[0] if population else Individu(genes=[])
 
 
-    def decoder_individu(self, individu: Individu) -> List[Dict]:
+        participants = random.sample(population, k_valide)
+        return max(participants, key=lambda x: x.fitness)
+
+    def decoder_individu(self, individu: Individu) -> List[Dict]: # Doit être une méthode
         planning = []
-        # Pour éviter de réassigner un co-jury à un moment où il est déjà pris
-        # par une autre soutenance décodée plus tôt dans CET individu.
-        jurys_occupes_decode = defaultdict(set)
+        jurys_occupes_decode_moment = defaultdict(set) # {moment_str: {jury1, jury2}}
+        creneaux_salles_decode_moment = defaultdict(set) # {moment_str_salle: True}
 
-        for idx_etu, idx_creneau in enumerate(individu.genes):
-            if idx_creneau == -1 or idx_creneau >= len(self.creneaux): # Vérif idx_creneau valide
+        if not individu.genes: return []
+
+        # Trier les gènes par index de créneau pour essayer de placer les soutenances tôt d'abord ?
+        # Ou traiter dans l'ordre des étudiants. L'ordre actuel est celui des étudiants.
+        
+        for idx_etu, idx_creneau_gene in enumerate(individu.genes):
+            if idx_creneau_gene == -1 or idx_creneau_gene >= len(self.creneaux):
                 continue
-            etudiant = self.planificateur.etudiants[idx_etu]
-            creneau = self.creneaux[idx_creneau]
-            tuteur = etudiant["Tuteur"]
-            moment_cle = creneau['moment'] # Clé pour jour + heure
+            
+            # Vérifier si l'étudiant est valide
+            if idx_etu >= len(self.planificateur.etudiants): continue
+            etudiant_obj = self.planificateur.etudiants[idx_etu]
+            creneau_obj_decode = self.creneaux[idx_creneau_gene]
+            tuteur_principal = etudiant_obj["Tuteur"]
+            
+            moment_str_decode = creneau_obj_decode['moment']
+            moment_salle_str_decode = f"{moment_str_decode}_{creneau_obj_decode['salle']}"
 
-            # Vérifier si le tuteur est déjà pris pour ce moment par une autre soutenance de cet individu
-            if tuteur in jurys_occupes_decode[moment_cle]:
-                continue # Conflit interne à l'individu, ne pas planifier cette soutenance
+            # 1. Vérifier si la salle est déjà prise à ce moment précis
+            if moment_salle_str_decode in creneaux_salles_decode_moment:
+                continue # Conflit de salle DANS cet individu, ignorer cette soutenance
 
-            co_jurys_disponibles_pour_creneau = self.planificateur.trouver_co_jurys_disponibles(
-                tuteur, creneau['jour'], creneau['heure']
+            # 2. Vérifier si le tuteur est déjà pris à ce moment (par une autre soutenance de cet individu)
+            if tuteur_principal in jurys_occupes_decode_moment[moment_str_decode]:
+                continue # Conflit de tuteur DANS cet individu, ignorer
+
+            # 3. Trouver un co-jury disponible pour ce créneau et ce tuteur, et qui n'est pas déjà pris
+            co_jurys_possibles_decode = self.planificateur.trouver_co_jurys_disponibles(
+                tuteur_principal, creneau_obj_decode['jour'], creneau_obj_decode['heure']
             )
             
-            co_jury_choisi = None
-            for cj in co_jurys_disponibles_pour_creneau:
-                if cj not in jurys_occupes_decode[moment_cle]:
-                    co_jury_choisi = cj
-                    break # Prendre le premier co-jury libre
-
-            if co_jury_choisi:
+            co_jury_final_choisi = None
+            random.shuffle(co_jurys_possibles_decode) # Introduire de l'aléatoire dans le choix du co-jury
+            for cj_cand_decode in co_jurys_possibles_decode:
+                if cj_cand_decode not in jurys_occupes_decode_moment[moment_str_decode]:
+                    co_jury_final_choisi = cj_cand_decode
+                    break
+            
+            if co_jury_final_choisi:
                 planning.append({
-                    "Étudiant": f"{etudiant['Prénom']} {etudiant['Nom']}",
-                    "Pays": etudiant['Pays'],
-                    "Tuteur": tuteur,
-                    "Co-jury": co_jury_choisi,
-                    "Jour": creneau['jour'],
-                    "Créneau": creneau['heure'],
-                    "Salle": creneau['salle'],
-                    "Début": creneau['datetime_debut'],
-                    "Fin": creneau['datetime_fin']
+                    "Étudiant": f"{etudiant_obj['Prénom']} {etudiant_obj['Nom']}",
+                    "Pays": etudiant_obj['Pays'], "Tuteur": tuteur_principal, "Co-jury": co_jury_final_choisi,
+                    "Jour": creneau_obj_decode['jour'], "Créneau": creneau_obj_decode['heure'], 
+                    "Salle": creneau_obj_decode['salle'],
+                    "Début": creneau_obj_decode['datetime_debut'], "Fin": creneau_obj_decode['datetime_fin']
                 })
-                # Marquer les jurys comme occupés pour ce moment DANS CET INDIVIDU
-                jurys_occupes_decode[moment_cle].add(tuteur)
-                jurys_occupes_decode[moment_cle].add(co_jury_choisi)
-            # else:
-                # Si aucun co-jury n'est trouvé ici (après qu'il ait été trouvé dans precalculer_creneaux_valides),
-                # cela signifie que les co-jurys potentiels sont déjà pris par d'autres soutenances
-                # assignées précédemment DANS LE MÊME INDIVIDU. C'est un type de conflit géré par la fitness.
+                # Marquer ressources comme utilisées pour les prochaines soutenances de CET individu
+                creneaux_salles_decode_moment[moment_salle_str_decode] = True
+                jurys_occupes_decode_moment[moment_str_decode].add(tuteur_principal)
+                jurys_occupes_decode_moment[moment_str_decode].add(co_jury_final_choisi)
         return planning
+
+# FIN DE LA CLASSE AlgorithmeGenetique
 
 
 class PlanificationOptimiseeV2:
+    # ... (le reste de la classe PlanificationOptimiseeV2 et de l'UI Streamlit) ...
+    # Assurez-vous que l'initialisation de charge_jurys_tuteur est bien présente
     def __init__(self, etudiants, co_jurys, dates, disponibilites, nb_salles, duree):
         self.etudiants = etudiants if etudiants else []
         self.co_jurys = co_jurys if co_jurys else []
@@ -430,21 +574,27 @@ class PlanificationOptimiseeV2:
         self.nb_salles = nb_salles
         self.duree = duree
 
-        self.tuteurs_referents = list(set([e["Tuteur"] for e in self.etudiants]))
+        self.tuteurs_referents = list(set([e["Tuteur"] for e in self.etudiants])) if self.etudiants else []
         self.tous_jurys = list(set(self.tuteurs_referents + self.co_jurys))
-        self.charge_jurys = {jury: 0 for jury in self.tous_jurys}
-        self.charge_jurys_cojury = {jury: 0 for jury in self.tous_jurys}
         
+        # Charges pour l'algorithme classique et la sélection de co-jury
+        self.charge_jurys_tuteur = {jury: 0 for jury in self.tous_jurys}
+        self.charge_jurys_cojury = {jury: 0 for jury in self.tous_jurys}
+        self.charge_jurys_total = {jury: 0 for jury in self.tous_jurys} # Pour l'équilibrage général
 
-    def generer_creneaux_uniques(self):
+    def generer_creneaux_uniques(self): # Doit être une méthode
         creneaux = []
         creneau_id = 0
+        if not self.dates: return [] # Garde
+
         for jour_obj in self.dates:
             jour_str_app = jour_obj.strftime("%A %d/%m/%Y")
-            # Étendu à 18h10
-            for periode in [("08:00", "13:00"), ("14:00", "18:10")]:
-                debut_dt_obj = datetime.strptime(periode[0], "%H:%M").time()
-                fin_dt_obj = datetime.strptime(periode[1], "%H:%M").time()
+            for periode in [("08:00", "13:00"), ("14:00", "18:10")]: # Soir étendu
+                try:
+                    debut_dt_obj = datetime.strptime(periode[0], "%H:%M").time()
+                    fin_dt_obj = datetime.strptime(periode[1], "%H:%M").time()
+                except ValueError: continue # Ignorer période mal formatée
+
                 current_dt = datetime.combine(jour_obj, debut_dt_obj)
                 end_dt = datetime.combine(jour_obj, fin_dt_obj)
 
@@ -453,139 +603,158 @@ class PlanificationOptimiseeV2:
                     heure_str_app = f"{current_dt.strftime('%H:%M')} - {fin_creneau_dt.strftime('%H:%M')}"
                     for salle_num in range(1, self.nb_salles + 1):
                         creneaux.append({
-                            'id': creneau_id,
-                            'jour': jour_str_app,
-                            'heure': heure_str_app,
-                            'salle': f"Salle {salle_num}",
-                            'datetime_debut': current_dt,
-                            'datetime_fin': fin_creneau_dt,
-                            'moment': f"{jour_str_app}_{heure_str_app}"
+                            'id': creneau_id, 'jour': jour_str_app, 'heure': heure_str_app,
+                            'salle': f"Salle {salle_num}", 'datetime_debut': current_dt,
+                            'datetime_fin': fin_creneau_dt, 'moment': f"{jour_str_app}_{heure_str_app}"
                         })
                         creneau_id += 1
                     current_dt = fin_creneau_dt
         return creneaux
 
-    def est_disponible(self, personne, jour_str_app, heure_str_app):
+    def est_disponible(self, personne, jour_str_app, heure_str_app): # Doit être une méthode
         key = f"{jour_str_app} | {heure_str_app}"
         return self.disponibilites.get(personne, {}).get(key, False)
 
-    def trouver_co_jurys_disponibles(self, tuteur_referent, jour_str_app, heure_str_app):
+    def trouver_co_jurys_disponibles(self, tuteur_referent, jour_str_app, heure_str_app): # Doit être une méthode
         co_jurys_dispo = []
-        for jury in self.tous_jurys:
-            if jury != tuteur_referent and self.est_disponible(jury, jour_str_app, heure_str_app):
-                co_jurys_dispo.append(jury)
-        co_jurys_dispo.sort(key=lambda x: self.charge_jurys.get(x, 0)) # Utiliser get pour éviter KeyError si charge non init
+        for jury_cand in self.tous_jurys:
+            if jury_cand != tuteur_referent and self.est_disponible(jury_cand, jour_str_app, heure_str_app):
+                co_jurys_dispo.append(jury_cand)
         
-        def sort_key_balance_roles(jury_candidat):
-            nb_tutorats = self.charge_jurys_tuteur.get(jury_candidat, 0)
-            nb_cojury = self.charge_jurys_cojury.get(jury_candidat, 0)
-            difference_roles = nb_tutorats - nb_cojury # Positif si plus de tutorats
-            charge_totale = self.charge_jurys.get(jury_candidat, 0) # Charge totale combinée
-    
-            # On veut prioriser ceux pour qui difference_roles est grande (besoin d'être co-jury)
-            # donc on trie par -difference_roles (décroissant)
-            # et ensuite par charge_totale (croissant)
-            return (-difference_roles, charge_totale)
+        # Tri pour la balance des rôles et ensuite par charge totale
+        def sort_key_balance_cojury(jury_c):
+            # Prioriser ceux qui ont été plus tuteurs que co-jurys (différence positive)
+            diff_roles = self.charge_jurys_tuteur.get(jury_c, 0) - self.charge_jurys_cojury.get(jury_c, 0)
+            charge_tot = self.charge_jurys_total.get(jury_c, 0)
+            # On veut trier par diff_roles décroissant (pour prendre ceux qui ont "besoin" d'être co-jury)
+            # puis par charge_totale croissante
+            return (-diff_roles, charge_tot)
 
-        co_jurys_dispo.sort(key=sort_key_balance_roles)
+        co_jurys_dispo.sort(key=sort_key_balance_cojury)
         return co_jurys_dispo
 
-    def optimiser_planning_ameliore(self):
+    def optimiser_planning_ameliore(self): # Doit être une méthode
+        # Réinitialisation des compteurs de charge pour cet appel
+        self.charge_jurys_tuteur = {jury: 0 for jury in self.tous_jurys}
+        self.charge_jurys_cojury = {jury: 0 for jury in self.tous_jurys}
+        self.charge_jurys_total = {jury: 0 for jury in self.tous_jurys}
+
         creneaux = self.generer_creneaux_uniques()
         planning = []
-        creneaux_occupes_ids = set()
-        jurys_par_moment_app = defaultdict(set)
+        creneaux_occupes_ids = set() # Par ID de créneau (salle incluse)
+        jurys_par_moment_app = defaultdict(set) # {moment_str: {jury1, jury2}}
+        
+        if not self.etudiants: return [], 0 # Pas d'étudiants
+        
         etudiants_melanges = self.etudiants.copy()
         random.shuffle(etudiants_melanges)
-        tentatives_par_etudiant = []
-        self.charge_jurys = {jury: 0 for jury in self.tous_jurys} # Réinitialiser les charges
-
-        for etudiant in etudiants_melanges:
-            tuteur_ref = etudiant["Tuteur"]
-            soutenance_planifiee_etu = False
-            tentatives_etu = 0
-            creneaux_melanges = creneaux.copy()
-            random.shuffle(creneaux_melanges)
-
-            for creneau_obj in creneaux_melanges:
-                tentatives_etu += 1
-                if creneau_obj['id'] in creneaux_occupes_ids: continue
-                if not self.est_disponible(tuteur_ref, creneau_obj['jour'], creneau_obj['heure']): continue
-                if tuteur_ref in jurys_par_moment_app[creneau_obj['moment']]: continue
-
-                co_jurys_possibles = self.trouver_co_jurys_disponibles(
-                    tuteur_ref, creneau_obj['jour'], creneau_obj['heure']
-                )
-                co_jurys_libres_pour_moment = [
-                    cj for cj in co_jurys_possibles
-                    if cj not in jurys_par_moment_app[creneau_obj['moment']]
-                ]
-
-                if co_jurys_libres_pour_moment:
-                    co_jury_choisi_final = co_jurys_libres_pour_moment[0] # Trié par charge
-                    planning.append({
-                        "Étudiant": f"{etudiant['Prénom']} {etudiant['Nom']}",
-                        "Pays": etudiant['Pays'], "Tuteur": tuteur_ref, "Co-jury": co_jury_choisi_final,
-                        "Jour": creneau_obj['jour'], "Créneau": creneau_obj['heure'], "Salle": creneau_obj['salle'],
-                        "Début": creneau_obj['datetime_debut'], "Fin": creneau_obj['datetime_fin']
-                    })
-                    creneaux_occupes_ids.add(creneau_obj['id'])
-                    jurys_par_moment_app[creneau_obj['moment']].add(tuteur_ref)
-                    jurys_par_moment_app[creneau_obj['moment']].add(co_jury_choisi_final)
-                    self.charge_jurys_tuteur[tuteur_ref] = self.charge_jurys_tuteur.get(tuteur_ref, 0) + 1
-                    self.charge_jurys_cojury[co_jury_choisi_final] = self.charge_jurys_cojury.get(co_jury_choisi_final, 0) + 1
-                    soutenance_planifiee_etu = True
-                    break
-            tentatives_par_etudiant.append(tentatives_etu)
-            if not soutenance_planifiee_etu and self.etudiants: # Éviter message si pas d'étudiants
-                 st.warning(f"⚠️ Classique: Impossible de planifier {etudiant['Prénom']} {etudiant['Nom']} après {tentatives_etu} tentatives.")
         
-        # self.afficher_diagnostics(planning, tentatives_par_etudiant) # Optionnel, peut être verbeux
-        return planning, (len(self.etudiants) - len(planning)) if self.etudiants else 0
+        non_planifies_count = 0
 
+        for etudiant_obj_classique in etudiants_melanges:
+            tuteur_ref_classique = etudiant_obj_classique["Tuteur"]
+            soutenance_planifiee_etu_classique = False
+            
+            creneaux_melanges_classique = creneaux.copy()
+            random.shuffle(creneaux_melanges_classique)
 
-    def optimiser_avec_genetique(self, utiliser_genetique_ui=False, **params_genetique_ui):
+            for creneau_obj_classique in creneaux_melanges_classique:
+                if creneau_obj_classique['id'] in creneaux_occupes_ids: continue
+                if not self.est_disponible(tuteur_ref_classique, creneau_obj_classique['jour'], creneau_obj_classique['heure']): continue
+                if tuteur_ref_classique in jurys_par_moment_app[creneau_obj_classique['moment']]: continue
+
+                co_jurys_possibles_classique = self.trouver_co_jurys_disponibles( # Utilise le tri par balance
+                    tuteur_ref_classique, creneau_obj_classique['jour'], creneau_obj_classique['heure']
+                )
+                co_jury_choisi_classique = None
+                for cj_cand_classique in co_jurys_possibles_classique:
+                    if cj_cand_classique not in jurys_par_moment_app[creneau_obj_classique['moment']]:
+                        co_jury_choisi_classique = cj_cand_classique
+                        break
+                
+                if co_jury_choisi_classique:
+                    planning.append({
+                        "Étudiant": f"{etudiant_obj_classique['Prénom']} {etudiant_obj_classique['Nom']}",
+                        "Pays": etudiant_obj_classique['Pays'], "Tuteur": tuteur_ref_classique, "Co-jury": co_jury_choisi_classique,
+                        "Jour": creneau_obj_classique['jour'], "Créneau": creneau_obj_classique['heure'], "Salle": creneau_obj_classique['salle'],
+                        "Début": creneau_obj_classique['datetime_debut'], "Fin": creneau_obj_classique['datetime_fin']
+                    })
+                    creneaux_occupes_ids.add(creneau_obj_classique['id'])
+                    jurys_par_moment_app[creneau_obj_classique['moment']].add(tuteur_ref_classique)
+                    jurys_par_moment_app[creneau_obj_classique['moment']].add(co_jury_choisi_classique)
+                    
+                    # Mise à jour des charges
+                    self.charge_jurys_tuteur[tuteur_ref_classique] += 1
+                    self.charge_jurys_cojury[co_jury_choisi_classique] += 1
+                    self.charge_jurys_total[tuteur_ref_classique] +=1
+                    self.charge_jurys_total[co_jury_choisi_classique] +=1
+                    
+                    soutenance_planifiee_etu_classique = True
+                    break
+            
+            if not soutenance_planifiee_etu_classique:
+                non_planifies_count += 1
+                st.sidebar.warning(f"Classique: {etudiant_obj_classique['Prénom']} non planifié.")
+        
+        return planning, non_planifies_count
+
+    def optimiser_avec_genetique(self, utiliser_genetique_ui=False, **params_genetique_ui): # Doit être une méthode
         planning_classique, non_planifies_classique = self.optimiser_planning_ameliore()
         nb_etudiants_total = len(self.etudiants) if self.etudiants else 0
         taux_reussite_classique = (len(planning_classique) / nb_etudiants_total) if nb_etudiants_total > 0 else 0
 
-        if utiliser_genetique_ui or taux_reussite_classique < 0.8: # Condition pour lancer l'AG
+        if utiliser_genetique_ui or (nb_etudiants_total > 0 and taux_reussite_classique < 0.85): # Seuil légèrement augmenté
             st.info("🧬 Lancement de l'optimisation génétique...")
-            config_ag = {
-                'taille_population': 80, 'nb_generations': 300, # Défauts AG robustes
-                'taux_mutation': 0.12, 'taux_croisement': 0.8,
+            config_ag = { # Défauts pour AG
+                'taille_population': 80, 'nb_generations': 300, 
+                'taux_mutation': 0.15, 'taux_croisement': 0.85, # Taux légèrement ajustés
                 **params_genetique_ui # UI écrase les défauts
             }
+            # S'assurer que les paramètres de l'AG sont valides
+            config_ag['taille_population'] = max(10, config_ag['taille_population']) # Min pop size
+            config_ag['nb_generations'] = max(10, config_ag['nb_generations'])     # Min generations
+
+
             ag_instance = AlgorithmeGenetique(self, **config_ag)
             planning_genetique, stats_ag = ag_instance.evoluer()
             stats_ag['amelioration_valeur'] = 0 # Init
 
+            # Choisir le meilleur planning
             if len(planning_genetique) > len(planning_classique):
                 st.success(f"✅ AG a amélioré: {len(planning_genetique)} vs {len(planning_classique)} (classique)")
                 stats_ag['amelioration_valeur'] = len(planning_genetique) - len(planning_classique)
                 return planning_genetique, nb_etudiants_total - len(planning_genetique), stats_ag
+            elif len(planning_genetique) == len(planning_classique) and stats_ag.get('fitness_finale', -float('inf')) > -100000 : # Si AG a un score décent
+                 # Comparer la fitness si le nombre de planifiés est le même (nécessiterait de calculer fitness du classique)
+                 # Pour l'instant, on favorise l'AG s'il fait aussi bien et a des stats.
+                 st.info(f"AG a planifié autant ({len(planning_genetique)}). On garde le résultat de l'AG.")
+                 return planning_genetique, nb_etudiants_total - len(planning_genetique), stats_ag
             else:
-                st.info("ℹ️ AG n'a pas amélioré ou est moins bon. Résultat classique conservé.")
-                # Retourner stats_ag pour analyse même si non utilisé
-                return planning_classique, non_planifies_classique, stats_ag
+                st.info("ℹ️ AG n'a pas amélioré. Résultat classique conservé.")
+                return planning_classique, non_planifies_classique, stats_ag # Retourner stats_ag pour info
         
         return planning_classique, non_planifies_classique, None # AG non déclenché
 
-    def afficher_diagnostics(self, planning, tentatives_par_etudiant):
-        # ... (Code de afficher_diagnostics, si vous voulez le garder)
+    def afficher_diagnostics(self, planning, tentatives_par_etudiant): # Doit être une méthode
+        # (Optionnel, peut être verbeux)
+        if not st.session_state.get('show_diagnostics_expanded', False): return # Contrôlable par un expander/checkbox
+
+        st.subheader("🔍 Diagnostics de l'optimisation")
+        # ... (le reste de la logique d'affichage des diagnostics)
         pass
 
-
-    def verifier_conflits(self, planning):
+    def verifier_conflits(self, planning): # Doit être une méthode
         conflits_messages = []
-        creneaux_salles_occupes = defaultdict(list)
-        jurys_moments_occupes = defaultdict(list)
+        # ... (Logique de vérification des conflits, qui semble correcte) ...
+        creneaux_salles_occupes = defaultdict(list) # moment_salle -> [etudiants]
+        jurys_moments_occupes = defaultdict(list)   # moment -> [(jury, etudiant)]
 
         for idx, soutenance in enumerate(planning):
             cle_moment_salle = f"{soutenance['Jour']}_{soutenance['Créneau']}_{soutenance['Salle']}"
             cle_moment = f"{soutenance['Jour']}_{soutenance['Créneau']}"
 
             creneaux_salles_occupes[cle_moment_salle].append(soutenance['Étudiant'])
+            # Stocker le nom du jury et l'étudiant associé pour des messages de conflit plus clairs
             jurys_moments_occupes[cle_moment].extend([
                 (soutenance['Tuteur'], soutenance['Étudiant']),
                 (soutenance['Co-jury'], soutenance['Étudiant'])
@@ -593,18 +762,22 @@ class PlanificationOptimiseeV2:
 
         for moment_salle, etudiants_conflit in creneaux_salles_occupes.items():
             if len(etudiants_conflit) > 1:
-                conflits_messages.append(f"Conflit de salle: {moment_salle} utilisé par {', '.join(etudiants_conflit)}")
+                conflits_messages.append(f"Salle: {moment_salle} surbookée ({', '.join(etudiants_conflit)})")
 
-        for moment, jurys_affectes in jurys_moments_occupes.items():
-            compteur_jurys_moment = defaultdict(list)
-            for jury, etudiant_associe in jurys_affectes:
+        for moment, jurys_affectes_avec_etu in jurys_moments_occupes.items():
+            compteur_jurys_moment = defaultdict(list) # jury -> [etudiants_associés]
+            for jury, etudiant_associe in jurys_affectes_avec_etu:
                 compteur_jurys_moment[jury].append(etudiant_associe)
             
             for jury, etudiants_pour_jury in compteur_jurys_moment.items():
                 if len(etudiants_pour_jury) > 1:
-                    conflits_messages.append(f"Conflit de jury: {jury} à {moment} pour {', '.join(etudiants_pour_jury)}")
+                    # Message plus clair: Le Jury X est assigné à EtudiantA ET EtudiantB au même moment
+                    etudiants_str = " et ".join(f"'{etu}'" for etu in etudiants_pour_jury)
+                    conflits_messages.append(f"Jury: {jury} à {moment} pour {etudiants_str}")
         return conflits_messages
 
+# ... (le reste du fichier : importer_disponibilites_excel et toute l'UI Streamlit) ...
+# (Aucun changement nécessaire dans l'UI pour cette modification de la fitness et de la sélection de co-jury)
 
 def importer_disponibilites_excel(uploaded_file, horaires_par_jour_app_config, tous_tuteurs_app, co_jurys_app):
     messages_succes, messages_erreur, messages_warning = [], [], []
