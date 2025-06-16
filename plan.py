@@ -199,7 +199,7 @@ class AlgorithmeGenetique: # Début de la classe
                 if difference == 0:
                     score_balance_roles += 100 # Fort bonus pour équilibre parfait
                 elif difference == 1:
-                    score_balance_roles += 30  # Bonus plus faible pour un écart de 1
+                    score_balance_roles += 20  # Bonus plus faible pour un écart de 1
 
         # Fonction de fitness (à maximiser)
         fitness = (
