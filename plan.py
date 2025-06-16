@@ -144,29 +144,59 @@ class AlgorithmeGenetique:
                     break
         return Individu(genes=genes)
 
-    def calculer_fitness_amelioree(self, individu: Individu) -> Individu:
-        planning = self.decoder_individu(individu)
-        nb_soutenances = len(planning)
-        nb_total = len(self.planificateur.etudiants)
-        taux_planification = nb_soutenances / nb_total if nb_total > 0 else 0
-        conflits_salle, conflits_jury = self._analyser_conflits_detailles(planning)
-        total_conflits = conflits_salle + conflits_jury
-        equilibrage = self._calculer_equilibrage_charge(planning)
-        bonus_alternance = self._calculer_bonus_alternance(planning)
-        fitness = (
-                taux_planification * 1000 +
-                max(0, (nb_soutenances - 20)) * 50 +
-                equilibrage * 20 +
-                bonus_alternance * 10 -
-                total_conflits * 500 -
-                (nb_total - nb_soutenances) * 100
-        )
-        if total_conflits == 0 and nb_soutenances > 30: # Ajuster ce seuil au besoin
-            fitness += 2000
-        individu.fitness = fitness
-        individu.soutenances_planifiees = nb_soutenances
-        individu.conflits = total_conflits
-        return individu
+    # Dans AlgorithmeGenetique.calculer_fitness_amelioree
+def calculer_fitness_amelioree(self, individu: Individu) -> Individu:
+    planning = self.decoder_individu(individu)
+
+    # ... (calculs existants : nb_soutenances, taux_planification, conflits, equilibrage, bonus_alternance) ...
+
+    # NOUVEAU: Calculer la balance Tuteur/Co-jury
+    roles_par_jury = defaultdict(lambda: {'tuteur': 0, 'cojury': 0})
+    for soutenance in planning:
+        roles_par_jury[soutenance['Tuteur']]['tuteur'] += 1
+        roles_par_jury[soutenance['Co-jury']]['cojury'] += 1
+
+    penalite_balance_roles = 0
+    score_balance_roles = 0 # Score positif si bien balancé
+    nb_jurys_concernes = 0
+
+    # On ne pénalise que les tuteurs référents pour cette règle (les co-jurys purs n'ont pas de "tuteurages")
+    # ou tous les jurys si on veut une balance stricte pour tous.
+    # Ici, on se concentre sur les personnes qui sont à la fois tuteurs et peuvent être co-jurys.
+    personnes_concernées_par_balance = set(self.planificateur.tuteurs_referents) & set(self.planificateur.co_jurys)
+    # Ou plus simplement, tous ceux qui apparaissent dans roles_par_jury :
+    # personnes_concernées_par_balance = roles_par_jury.keys()
+
+
+    for jury, counts in roles_par_jury.items():
+        # Appliquer cette règle spécifiquement aux personnes qui sont désignées comme tuteurs d'étudiants
+        # ET qui sont aussi dans la liste des co-jurys potentiels.
+        # Les purs co-jurys (qui ne sont jamais tuteurs) ne sont pas concernés par cette "balance".
+        if jury in self.planificateur.tuteurs_referents and jury in self.planificateur.co_jurys:
+            nb_jurys_concernes +=1
+            difference = abs(counts['tuteur'] - counts['cojury'])
+            penalite_balance_roles += difference * 100 # Pénalité forte par unité de différence
+            
+            # Bonus si parfaitement équilibré (ou presque)
+            if difference <= 1: # Permettre une petite marge
+                score_balance_roles += 50
+            elif difference == 0:
+                score_balance_roles += 100
+
+
+    # Ajuster la fonction de fitness
+    fitness = (
+            taux_planification * 1000 +
+            max(0, (nb_soutenances - 20)) * 50 +
+            equilibrage * 20 +  # Équilibrage global déjà présent
+            bonus_alternance * 10 -
+            total_conflits * 500 -
+            (nb_total - nb_soutenances) * 100 -
+            penalite_balance_roles + # Ajouter la nouvelle pénalité
+            score_balance_roles # Ajouter le nouveau bonus
+    )
+    # ... (reste de la fonction) ...
+    return individu
 
     def _analyser_conflits_detailles(self, planning):
         conflits_salle = 0
