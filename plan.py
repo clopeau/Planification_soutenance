@@ -476,7 +476,7 @@ class PlanificationOptimiseeV2:
         for jour in self.dates:
             jour_str = jour.strftime("%A %d/%m/%Y")
             # Créneaux matin et après-midi
-            for periode in [("08:00", "13:00"), ("14:00", "17:20")]:
+            for periode in [("08:00", "13:00"), ("14:00", "18:10")]:
                 debut, fin = periode
                 current = datetime.combine(jour, datetime.strptime(debut, "%H:%M").time())
                 end = datetime.combine(jour, datetime.strptime(fin, "%H:%M").time())
@@ -847,7 +847,7 @@ elif st.session_state.etape == "disponibilites":
         for jour in st.session_state.dates_soutenance:
             jour_str = jour.strftime("%A %d/%m/%Y")
             creneaux = []
-            for (debut, fin) in [("08:00", "13:00"), ("14:00", "17:20")]:
+            for (debut, fin) in [("08:00", "13:00"), ("14:00", "18:10")]:
                 current = datetime.combine(jour, datetime.strptime(debut, "%H:%M").time())
                 end = datetime.combine(jour, datetime.strptime(fin, "%H:%M").time())
                 while current + timedelta(minutes=st.session_state.duree_soutenance) <= end:
