@@ -903,6 +903,7 @@ elif st.session_state.etape == "generation":
     col1, col2 = st.columns(2)
     with col1:
         utiliser_genetique = st.checkbox("Forcer l'utilisation de l'algorithme génétique",
+                                         value=True,  # Case cochée par défaut
                                        help="L'algorithme génétique sera utilisé automatiquement si l'algorithme classique ne donne pas de bons résultats")
 
     with col2:
