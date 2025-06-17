@@ -1193,13 +1193,13 @@ elif st.session_state.etape == "disponibilites_selection":
                     for c_d_l_force in creneaux_list_jour_disp:
                         st.session_state.disponibilites[personne_disp_loop][f"{jour_disp_loop} | {c_d_l_force}"] = True
                     # Forcer un re-render pour que les cases individuelles reflètent le changement
-                    st.experimental_rerun() 
+                    st.rerun() 
                 
                 # Si l'utilisateur VIENT DE DECOCHER "Toute la journée"
                 if not all_selected_interaction_val and toutes_coches_jour_actuel:
                     for c_d_l_force in creneaux_list_jour_disp:
                          st.session_state.disponibilites[personne_disp_loop][f"{jour_disp_loop} | {c_d_l_force}"] = False
-                    st.experimental_rerun()
+                    st.rerun()
 
 
                 cols_disp_cb = st.columns(min(len(creneaux_list_jour_disp), 4))
@@ -1228,7 +1228,7 @@ elif st.session_state.etape == "disponibilites_selection":
                             if checked_individual_val != valeur_actuelle_cb_state: # Et que sa valeur a changé
                                  st.session_state.disponibilites[personne_disp_loop][key_dispo_individual_cb] = checked_individual_val
                                  # Si ce changement affecte l'état de "Toute la journée", il faut un rerun pour la mettre à jour
-                                 st.experimental_rerun()
+                                 st.rerun()
                 st.markdown("---")
             st.divider() 
 
