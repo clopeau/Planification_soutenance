@@ -190,6 +190,7 @@ class AlgorithmeGenetique: # Début de la classe
         # Personnes qui peuvent être à la fois tuteur et co-jury
         personnes_eligibles_balance = set(self.planificateur.tuteurs_referents) & set(self.planificateur.co_jurys)
 
+        contrainte_parite_violee = False
         for jury, counts in roles_par_jury.items():
             if jury in personnes_eligibles_balance:
                 difference = abs(counts['tuteur'] - counts['cojury'])
@@ -197,9 +198,7 @@ class AlgorithmeGenetique: # Début de la classe
                 penalite_balance_roles += (difference ** 2) * 20 # Ajuster le poids (ex: 20)
                 
                 if difference == 0:
-                    score_balance_roles += 100 # Fort bonus pour équilibre parfait
-                elif difference == 1:
-                    score_balance_roles += 20  # Bonus plus faible pour un écart de 1
+                    score_balance_roles += 1000 # Fort bonus pour équilibre parfait
 
         # Fonction de fitness (à maximiser)
         fitness = (
