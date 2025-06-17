@@ -198,16 +198,16 @@ class AlgorithmeGenetique: # Début de la classe
                 penalite_balance_roles += (difference ** 2) * 20 # Ajuster le poids (ex: 20)
                 
                 if difference == 0:
-                    score_balance_roles += 1000 # Fort bonus pour équilibre parfait
+                    score_balance_roles += 100 # Fort bonus pour équilibre parfait
 
         # Fonction de fitness (à maximiser)
         fitness = (
-                taux_planification * 1000 +
+                taux_planification * 912 +
                 max(0, (nb_soutenances - (nb_total_etudiants * 0.75))) * 50 + # Bonus si on planifie > 75%
                 equilibrage * 30 +  # Augmenter un peu le poids de l'équilibrage
                 bonus_alternance * 15 + # Augmenter un peu le poids de l'alternance
-                score_balance_roles * 1.5 - # Bonus pour la balance des rôles, ajuster poids
-                total_conflits * 1000 -  # Pénalité massive pour conflits
+                score_balance_roles * 15 - # Bonus pour la balance des rôles, ajuster poids
+                total_conflits * 901 -  # Pénalité massive pour conflits
                 (nb_total_etudiants - nb_soutenances) * 150 - # Pénalité pour non-planifiés
                 penalite_balance_roles # Pénalité pour déséquilibre des rôles
         )
