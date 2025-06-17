@@ -588,7 +588,7 @@ class PlanificationOptimiseeV2:
 
         for jour_obj in self.dates:
             jour_str_app = jour_obj.strftime("%A %d/%m/%Y")
-            for periode in [("08:00", "13:00"), ("14:00", "18:10")]: # Soir étendu
+            for periode in [("08:00", "12:10"), ("14:00", "18:10")]: # Soir étendu
                 try:
                     debut_dt_obj = datetime.strptime(periode[0], "%H:%M").time()
                     fin_dt_obj = datetime.strptime(periode[1], "%H:%M").time()
@@ -947,7 +947,7 @@ elif st.session_state.etape == "disponibilites": # Génération et affichage des
             jour_str_cfg = jour_obj_cfg.strftime("%A %d/%m/%Y")
             creneaux_cfg = []
             # Étendu à 18h10
-            for (debut_cfg, fin_cfg) in [("08:00", "13:00"), ("14:00", "18:10")]:
+            for (debut_cfg, fin_cfg) in [("08:00", "12:10"), ("14:00", "18:10")]:
                 current_cfg_dt = datetime.combine(jour_obj_cfg, datetime.strptime(debut_cfg, "%H:%M").time())
                 end_cfg_dt = datetime.combine(jour_obj_cfg, datetime.strptime(fin_cfg, "%H:%M").time())
                 while current_cfg_dt + timedelta(minutes=st.session_state.duree_soutenance) <= end_cfg_dt:
