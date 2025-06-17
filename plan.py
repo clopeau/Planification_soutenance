@@ -849,21 +849,43 @@ def importer_disponibilites_excel_simple_header(
             if map_creneaux_app: err_msg.append(f"Attendu (ex): '{list(map_creneaux_app.keys())[0]}'")
             return [], err_msg, []
 
-        for _, row in df_excel.iterrows():
-            nom_ens_excel = str(row[col_ens_nom]).strip()
-            if not nom_ens_excel: continue
-            best_match, h_score = None, 0
-            for nom_app in personnes_reconnues_app_set:
-                score = fuzz.ratio(nom_ens_excel.lower(), nom_app.lower())
-                if score > h_score: h_score, best_match = score, nom_app
+        for _, row in df_excel.iterrows(): # ou df_csv.iterrows()
+            nom_enseignant_fichier = str(row[col_ens_nom]).strip() # Nom lu du fichier
+            if not nom_enseignant_fichier: continue
+
+            best_match_nom_app = None
+            highest_score = 0
             
-            nom_ens_final = None
-            if h_score >= score_matching_seuil:
-                nom_ens_final = best_match
-                if nom_ens_final != nom_ens_excel: messages_warning.append(f"Excel:'{nom_ens_excel}' -> App:'{nom_ens_final}' ({h_score}%)")
+            # Normaliser la casse pour un matching plus robuste
+            nom_enseignant_fichier_lower = nom_enseignant_fichier.lower()
+
+            for nom_app in personnes_reconnues_app_set:
+                nom_app_lower = nom_app.lower()
+                
+                # Utiliser token_sort_ratio ou token_set_ratio
+                # score = fuzz.ratio(nom_enseignant_fichier_lower, nom_app_lower) # Ancienne méthode
+                score = fuzz.token_sort_ratio(nom_enseignant_fichier_lower, nom_app_lower)
+                # OU (souvent encore mieux pour les variations) :
+                # score = fuzz.token_set_ratio(nom_enseignant_fichier_lower, nom_app_lower)
+
+                if score > highest_score:
+                    highest_score = score
+                    best_match_nom_app = nom_app # Garder le nom original de l'app pour l'affichage
+            
+            nom_enseignant_final_pour_app = None
+            if highest_score >= score_matching_seuil:
+                nom_enseignant_final_pour_app = best_match_nom_app
+                # Afficher le nom original du fichier et le nom de l'app si le match n'est pas parfait ou si le nom est différent
+                if nom_enseignant_final_pour_app.lower() != nom_enseignant_fichier_lower or highest_score < 100 :
+                     messages_warning.append(
+                         f"Fichier: '{nom_enseignant_fichier}' rapproché avec App: '{nom_enseignant_final_pour_app}' (score: {highest_score}%)"
+                     )
             else:
-                messages_warning.append(f"Excel:'{nom_ens_excel}' non rapproché (max {h_score}% vs '{best_match}'). Ignoré.")
+                messages_warning.append(
+                    f"Fichier: '{nom_enseignant_fichier}' non rapproché (meilleur score: {highest_score}% vs '{best_match_nom_app if best_match_nom_app else 'aucun'}'). Ignoré."
+                )
                 continue
+                        
 
             personnes_traitees_import.add(nom_ens_final)
             if nom_ens_final not in st.session_state.disponibilites: st.session_state.disponibilites[nom_ens_final] = {}
