@@ -807,7 +807,7 @@ def importer_disponibilites_excel_simple_header(
                                 horaires_par_jour_app_config: Dict[str, List[str]], 
                                 tous_tuteurs_app: List[str], 
                                 co_jurys_app: List[str],
-                                score_matching_seuil=75):
+                                score_matching_seuil=75): # J'ai remis 75 comme vous l'aviez
     messages_succes, messages_erreur, messages_warning = [], [], []
     personnes_traitees_import, personnes_reconnues_app_set = set(), set(tous_tuteurs_app + co_jurys_app)
     map_creneaux_app, cles_dispo_valides_app_set = {}, set()
@@ -838,10 +838,12 @@ def importer_disponibilites_excel_simple_header(
                 try:
                     idx_a = parts.index("à")
                     if idx_a > 0 and idx_a + 1 < len(parts):
+                        # S'assurer que parts[1] et parts[idx_a + 1] sont bien des heures
+                        # Une vérification plus robuste pourrait utiliser regex ici
                         cle_excel_match = f"{parts[0]} {parts[1]} à {parts[idx_a + 1]}"
                         if cle_excel_match in map_creneaux_app:
                             cleaned_col_map[col_raw] = map_creneaux_app[cle_excel_match]
-                except ValueError: pass 
+                except ValueError: pass # "à" non trouvé ou autre problème de format
 
         if not cleaned_col_map:
             err_msg = ["Aucun en-tête de créneau Excel mappé. Vérifiez formats."]
@@ -849,33 +851,24 @@ def importer_disponibilites_excel_simple_header(
             if map_creneaux_app: err_msg.append(f"Attendu (ex): '{list(map_creneaux_app.keys())[0]}'")
             return [], err_msg, []
 
-        for _, row in df_excel.iterrows(): # ou df_csv.iterrows()
-            nom_enseignant_fichier = str(row[col_ens_nom]).strip() # Nom lu du fichier
+        for _, row in df_excel.iterrows(): 
+            nom_enseignant_fichier = str(row[col_ens_nom]).strip() 
             if not nom_enseignant_fichier: continue
 
             best_match_nom_app = None
             highest_score = 0
-            
-            # Normaliser la casse pour un matching plus robuste
             nom_enseignant_fichier_lower = nom_enseignant_fichier.lower()
 
             for nom_app in personnes_reconnues_app_set:
                 nom_app_lower = nom_app.lower()
-                
-                # Utiliser token_sort_ratio ou token_set_ratio
-                # score = fuzz.ratio(nom_enseignant_fichier_lower, nom_app_lower) # Ancienne méthode
                 score = fuzz.token_sort_ratio(nom_enseignant_fichier_lower, nom_app_lower)
-                # OU (souvent encore mieux pour les variations) :
-                # score = fuzz.token_set_ratio(nom_enseignant_fichier_lower, nom_app_lower)
-
                 if score > highest_score:
                     highest_score = score
-                    best_match_nom_app = nom_app # Garder le nom original de l'app pour l'affichage
+                    best_match_nom_app = nom_app
             
-            nom_enseignant_final_pour_app = None
+            nom_enseignant_final_pour_app = None # Initialisation ici pour la portée
             if highest_score >= score_matching_seuil:
                 nom_enseignant_final_pour_app = best_match_nom_app
-                # Afficher le nom original du fichier et le nom de l'app si le match n'est pas parfait ou si le nom est différent
                 if nom_enseignant_final_pour_app.lower() != nom_enseignant_fichier_lower or highest_score < 100 :
                      messages_warning.append(
                          f"Fichier: '{nom_enseignant_fichier}' rapproché avec App: '{nom_enseignant_final_pour_app}' (score: {highest_score}%)"
@@ -885,18 +878,22 @@ def importer_disponibilites_excel_simple_header(
                     f"Fichier: '{nom_enseignant_fichier}' non rapproché (meilleur score: {highest_score}% vs '{best_match_nom_app if best_match_nom_app else 'aucun'}'). Ignoré."
                 )
                 continue
-                        
-
-            personnes_traitees_import.add(nom_ens_final)
-            if nom_ens_final not in st.session_state.disponibilites: st.session_state.disponibilites[nom_ens_final] = {}
+            
+            # Si on arrive ici, nom_enseignant_final_pour_app EST défini.
+            personnes_traitees_import.add(nom_enseignant_final_pour_app) # Correction: Utiliser la variable correcte
+            if nom_enseignant_final_pour_app not in st.session_state.disponibilites: # Correction: Utiliser la variable correcte
+                st.session_state.disponibilites[nom_enseignant_final_pour_app] = {} # Correction: Utiliser la variable correcte
             
             for col_orig_excel, cle_app_match in cleaned_col_map.items():
-                if col_orig_excel in row:
+                if col_orig_excel in row: # S'assurer que la colonne existe dans la ligne actuelle
                     val = row[col_orig_excel]
                     try:
                         if pd.isna(val): continue
-                        st.session_state.disponibilites[nom_ens_final][cle_app_match] = bool(int(float(val)))
-                    except ValueError: messages_erreur.append(f"Val:'{val}' invalide pour '{nom_ens_excel}' à '{col_orig_excel}'.")
+                        # Correction: Utiliser la variable correcte
+                        st.session_state.disponibilites[nom_enseignant_final_pour_app][cle_app_match] = bool(int(float(val)))
+                    except ValueError: 
+                        # Correction: Utiliser la variable correcte pour le nom de l'enseignant du fichier
+                        messages_erreur.append(f"Val:'{val}' invalide pour '{nom_enseignant_fichier}' à '{col_orig_excel}'.")
 
         for p_nettoyage in personnes_traitees_import:
             if p_nettoyage in st.session_state.disponibilites:
@@ -908,7 +905,6 @@ def importer_disponibilites_excel_simple_header(
     except ImportError: messages_erreur.append("'openpyxl' requis. `pip install openpyxl`")
     except Exception as e: messages_erreur.append(f"Erreur import Excel: {str(e)}")
     return messages_succes, messages_erreur, messages_warning
-
 
 def importer_disponibilites_csv(uploaded_file, 
                                 horaires_par_jour_app_config: Dict[str, List[str]], 
