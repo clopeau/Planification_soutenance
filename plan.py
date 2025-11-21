@@ -1,3 +1,14 @@
+C'est une erreur de ma part, je m'en excuse. Le message d'erreur NameError indique que la variable df n'est pas définie à cet endroit précis du code.
+
+Dans la fonction importer_disponibilites_csv, j'ai nommé le tableau de données df_csv lors de la lecture, mais j'ai écrit par erreur df.iterrows() (le nom standard) au lieu de df_csv.iterrows() dans la boucle.
+
+Voici le code corrigé. Vous pouvez remplacer tout le contenu de votre fichier app.py par celui-ci.
+
+code
+Python
+download
+content_copy
+expand_less
 import streamlit as st
 from datetime import datetime, timedelta
 import pandas as pd
@@ -820,7 +831,8 @@ def importer_disponibilites_csv(uploaded_file,
 
     col_nom = df_csv.columns[0] 
 
-    for _, row in df.iterrows():
+    # CORRECTION: Utilisation explicite de df_csv
+    for _, row in df_csv.iterrows():
         nom_csv_brut = str(row[col_nom]).strip()
         if not nom_csv_brut or pd.isna(row[col_nom]): continue
 
