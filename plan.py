@@ -517,26 +517,3 @@ elif st.session_state.etape == 5:
                 "text/csv",
                 key='download-csv'
             )
-Comment utiliser cette nouvelle version :
-
-Lancez l'application.
-
-Étape 1 : Chargez votre fichier etudiants.csv. Le code détectera automatiquement les colonnes même s'il y a des majuscules ou des espaces.
-
-Étape 2 : Configurez (Nb salles = 2, Durée = 50 min).
-
-Étape 3 :
-
-Sélectionnez 3 jours.
-
-Entrez précisément : 26/01/2026, 27/01/2026, 29/01/2026 (les dates de votre CSV).
-
-Étape 4 : Chargez Disponibilités tuteurs.csv.
-
-Le code va détecter que c'est séparé par des virgules (,).
-
-Il va faire le lien entre "CIUPERCA Sorin" et "IONEL CIUPERCA" grâce à la logique floue.
-
-Étape 5 : Cliquez sur Lancer.
-
-L'algorithme va prioriser les cas difficiles (ex: ceux dont le tuteur n'est là que le lundi matin) et remplir les trous. Si un étudiant ne peut pas être placé, il vous dira exactement qui et pourquoi (souvent car le tuteur n'a aucune dispo commune avec une salle libre).
