@@ -11,7 +11,7 @@ import random
 import unicodedata
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Planification Soutenances v11", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="Planification Soutenances v12 (CSV Fix)", layout="wide", page_icon="🛡️")
 
 # --- STYLES ---
 st.markdown("""
@@ -34,8 +34,9 @@ for key, value in DEFAULT_STATE.items():
 # --- HELPERS ---
 def clean_str(val):
     if pd.isna(val) or str(val).lower() in ['nan', 'none', '']: return ""
-    val_str = str(val).strip()
-    return val_str.replace("\n", " ").replace("\r", "")
+    # Nettoyage radical des sauts de ligne et espaces multiples
+    val = str(val).replace('\n', ' ').replace('\r', '').strip()
+    return " ".join(val.split())
 
 def normalize_text(text):
     if not isinstance(text, str): return str(text)
@@ -43,28 +44,54 @@ def normalize_text(text):
     text = unicodedata.normalize('NFD', text).encode('ascii', 'ignore').decode("utf-8")
     return text
 
-def lire_csv_force(uploaded_file, separator):
-    """Lecture forcée avec le séparateur choisi par l'utilisateur."""
+def lire_csv_robuste(uploaded_file):
+    """
+    Lecture renforcée pour gérer les CSV complexes (virgules dans les textes, sauts de ligne).
+    """
     uploaded_file.seek(0)
     content = uploaded_file.getvalue()
-    # Essai UTF-8 puis Latin-1
-    try:
-        return pd.read_csv(StringIO(content.decode('utf-8')), sep=separator, engine='python'), None
-    except:
+    encodings = ['utf-8', 'latin-1', 'cp1252']
+    # Priorité à la virgule car votre fichier exemple utilise des virgules
+    separators = [',', ';'] 
+    
+    for enc in encodings:
         try:
-            return pd.read_csv(StringIO(content.decode('latin-1')), sep=separator, engine='python'), None
-        except Exception as e:
-            return None, f"Erreur de lecture : {str(e)}"
+            decoded = content.decode(enc)
+            for sep in separators:
+                try:
+                    # engine='python' et quotechar='"' sont cruciaux pour votre fichier
+                    df = pd.read_csv(
+                        StringIO(decoded), 
+                        sep=sep, 
+                        engine='python', 
+                        quotechar='"',
+                        on_bad_lines='skip' # Ignore les lignes vraiment cassées
+                    )
+                    # Vérification simple : Si on a beaucoup de colonnes, c'est probablement bon
+                    if len(df.columns) > 3:
+                        return df, None
+                except: continue
+        except: continue
+            
+    return None, "Impossible de lire le fichier. Vérifiez qu'il est bien au format CSV (UTF-8 ou Latin-1)."
 
 # --- IMPORTERS ---
-def importer_etudiants(df):
-    # Mapping EXACT basé sur vos fichiers
+def importer_etudiants(uploaded_file):
+    df, error = lire_csv_robuste(uploaded_file)
+    if error: return [], error
+    
+    # Nettoyage des noms de colonnes (retirer espaces autour)
+    df.columns = [str(c).strip() for c in df.columns]
+    
+    # Mapping STRICT basé sur votre fichier exemple
     col_map = {}
+    
+    # Liste des variantes possibles pour vos colonnes
     targets = {
-        'nom': ['NOM', 'Nom'],
-        'prenom': ['PRENOM', 'Prénom'],
-        'tuteur': ['Enseignant référent (NOM Prénom)', 'Enseignant référent', 'Tuteur'],
-        'pays': ['Service d’accueil – Pays', 'Pays']
+        'nom': ['NOM', 'Nom', 'Nom étudiant'],
+        'prenom': ['PRENOM', 'Prénom', 'Prénom étudiant'],
+        'tuteur': ['Enseignant référent (NOM Prénom)', 'Enseignant référent', 'Tuteur', 'Enseignant'],
+        'pays': ['Service d’accueil – Pays', 'Pays', 'Pays étudiant']
     }
     
     for key, candidates in targets.items():
@@ -73,31 +100,50 @@ def importer_etudiants(df):
                 col_map[key] = cand
                 break
     
-    # Fallback Fuzzy
-    if 'nom' not in col_map:
-        for c in df.columns:
-            norm = normalize_text(c)
-            if "NOM" in norm and "PRENOM" not in norm and "REFERENT" not in norm: col_map['nom'] = c; break
+    # Fallback (Recherche floue si les noms exacts ne sont pas trouvés)
+    raw_cols = list(df.columns)
+    cols_norm = {normalize_text(c): c for c in raw_cols}
     
+    if 'nom' not in col_map:
+        for n, r in cols_norm.items(): 
+            if "NOM" in n and "PRENOM" not in n and "REFERENT" not in n and "ACCUEIL" not in n: col_map['nom'] = r; break
     if 'tuteur' not in col_map:
-        for c in df.columns:
-            norm = normalize_text(c)
-            if ("REFERENT" in norm or "ENSEIGNANT" in norm) and "ENTREPRISE" not in norm: col_map['tuteur'] = c; break
+        for n, r in cols_norm.items():
+            if ("REFERENT" in n or "ENSEIGNANT" in n) and "ENTREPRISE" not in n: col_map['tuteur'] = r; break
 
+    # Vérification critique
     missing = [k for k in ['nom', 'tuteur'] if k not in col_map]
-    if missing: return [], f"Colonnes manquantes: {missing}. Colonnes lues: {list(df.columns)}"
+    if missing: 
+        return [], f"Colonnes introuvables : {missing}. <br>Colonnes détectées : {raw_cols}"
 
     etudiants = []
+    parsing_errors = 0
+    
     for _, row in df.iterrows():
         n = clean_str(row.get(col_map.get('nom')))
         p = clean_str(row.get(col_map.get('prenom'), ''))
         t = clean_str(row.get(col_map.get('tuteur')))
         y = clean_str(row.get(col_map.get('pays'), ''))
-        if n and t:
+        
+        # SÉCURITÉ ANTI-DÉCALAGE
+        # Si le "Nom" ou le "Tuteur" est trop long (> 50 chars), c'est sûrement une description de stage qui a décalé
+        if len(t) > 50 or len(n) > 50:
+            parsing_errors += 1
+            continue 
+            
+        if n and t and t.lower() != 'nan':
             etudiants.append({"Prénom": p, "Nom": n, "Pays": y, "Tuteur": t})
-    return etudiants, None
+    
+    msg = None
+    if parsing_errors > 0:
+        msg = f"Attention : {parsing_errors} lignes ont été ignorées car elles semblaient mal formatées (texte trop long dans les colonnes noms)."
+        
+    return etudiants, msg
 
-def importer_disponibilites(df, tuteurs_connus, co_jurys_connus, horaires_config):
+def importer_disponibilites(uploaded_file, tuteurs_connus, co_jurys_connus, horaires_config):
+    df, error = lire_csv_robuste(uploaded_file)
+    if error: return [], [], [error]
+    
     personnes_reconnues = {p for p in (tuteurs_connus + co_jurys_connus) if p and str(p).lower() != 'nan'}
     
     date_cols_map = {} 
@@ -110,12 +156,12 @@ def importer_disponibilites(df, tuteurs_connus, co_jurys_connus, horaires_config
                     for c in c_list:
                         if c.startswith(h_csv): date_cols_map[col] = f"{j_app} | {c}"; break
     
-    if not date_cols_map: return {}, [], ["Pas de colonnes dates valides (Vérifiez l'année)."]
+    if not date_cols_map: return {}, [], ["Pas de colonnes dates valides. Vérifiez l'année (2026?) dans l'étape 3."]
 
     dispos_data = {}
     treated = set()
     logs = []
-    col_nom = df.columns[0] # On suppose que le nom est en 1er
+    col_nom = df.columns[0]
     
     for _, row in df.iterrows():
         nom_brut = clean_str(row[col_nom])
@@ -126,17 +172,19 @@ def importer_disponibilites(df, tuteurs_connus, co_jurys_connus, horaires_config
             score = fuzz.token_sort_ratio(nom_brut.lower(), p.lower())
             if score > best_score: best_score, best_match = score, p
         
-        if best_score >= 60: # Seuil abaissé pour plus de tolérance
+        if best_score >= 65:
             final_name = best_match
             if final_name not in dispos_data: dispos_data[final_name] = {}
             for col_csv, key_app in date_cols_map.items():
                 val = row.get(col_csv, 0)
                 try:
-                    dispos_data[final_name][key_app] = bool(int(float(val))) if pd.notna(val) else False
+                    # Gestion robuste des "1", 1, 1.0
+                    is_open = bool(int(float(val))) if pd.notna(val) else False
+                    dispos_data[final_name][key_app] = is_open
                 except: pass
             treated.add(final_name)
         else:
-            logs.append(f"Ignoré: {nom_brut} (Match: {best_match} {best_score}%)")
+            logs.append(f"Ignoré: {nom_brut} (Match max: {best_match} {best_score}%)")
             
     return dispos_data, list(treated), logs
 
@@ -172,7 +220,9 @@ class SchedulerEngine:
         return slots
 
     def is_available(self, person, slot_key):
-        if person not in self.dispos: return True # Default TRUE
+        # MODE SECOURS : Si la personne n'est pas dans le fichier, on suppose qu'elle est dispo
+        # Sinon, on ne pourrait jamais placer les étudiants dont le tuteur a oublié de remplir le fichier
+        if person not in self.dispos: return True 
         return self.dispos[person].get(slot_key, False)
 
     def run_optimization(self):
@@ -264,36 +314,35 @@ with st.sidebar:
 
 if st.session_state.etape == 1:
     st.title("1. Import des Étudiants")
-    st.info("Le fichier doit contenir des colonnes NOM, PRENOM, ENSEIGNANT REFERENT.")
+    st.markdown("Le fichier doit être un CSV (séparateur virgule ou point-virgule). Le système détectera automatiquement les colonnes.")
     
-    # SÉLECTEUR DE SÉPARATEUR MANUEL
-    sep = st.radio("Séparateur du fichier :", ["; (Point-virgule)", ", (Virgule)"], index=0, horizontal=True)
-    separator = ";" if sep.startswith(";") else ","
-    
-    f = st.file_uploader("Fichier Étudiants", type=['csv'])
+    f = st.file_uploader("Fichier Étudiants", type=['csv', 'xlsx'])
     if f:
-        df, err = lire_csv_force(f, separator)
-        if err: st.error(err)
+        data, msg = importer_etudiants(f)
+        if not data:
+            st.error(msg)
         else:
-            st.write("Aperçu des données lues (Vérifiez que les colonnes sont séparées) :")
-            st.dataframe(df.head(3))
+            st.session_state.etudiants = data
+            if msg: st.warning(msg)
+            st.success(f"{len(data)} étudiants importés avec succès.")
             
-            data, err = importer_etudiants(df)
-            if err: st.error(err)
-            else:
-                st.session_state.etudiants = data
-                st.success(f"{len(data)} étudiants importés.")
-                if st.button("Suivant"): st.session_state.etape = 2; st.rerun()
+            # APERÇU POUR VERIFICATION
+            st.write("Aperçu des données lues :")
+            st.dataframe(pd.DataFrame(data).head())
+            
+            if st.button("Suivant"): st.session_state.etape = 2; st.rerun()
 
 elif st.session_state.etape == 2:
     st.title("2. Paramètres")
     c1, c2 = st.columns(2)
     st.session_state.nb_salles = c1.number_input("Salles", 1, 10, st.session_state.nb_salles)
     st.session_state.duree = c2.number_input("Durée (min)", 30, 120, st.session_state.duree)
+    st.info("Pour le CSV fourni : Mettre 50 min.")
     if st.button("Suivant"): st.session_state.etape = 3; st.rerun()
 
 elif st.session_state.etape == 3:
     st.title("3. Dates")
+    st.info("Sélectionnez les jours du CSV (ex: 26, 27, 29 Janvier 2026).")
     nb = st.number_input("Nb Jours", 1, 5, max(3, len(st.session_state.dates)))
     ds = []; cols = st.columns(4)
     for i in range(nb):
@@ -312,35 +361,28 @@ elif st.session_state.etape == 4:
     mapping_config = defaultdict(list)
     for s in eng.slots: k = s['key'].split(" | "); mapping_config[k[0]].append(k[1])
     
-    # SÉLECTEUR DE SÉPARATEUR MANUEL
-    sep = st.radio("Séparateur du fichier :", [", (Virgule)", "; (Point-virgule)"], index=0, horizontal=True)
-    separator = ";" if sep.startswith(";") else ","
-    
     f = st.file_uploader("Fichier Disponibilités", type=['csv'])
     if f:
-        df, err = lire_csv_force(f, separator)
-        if err: st.error(err)
+        tuteurs_propres = [e['Tuteur'] for e in st.session_state.etudiants if e['Tuteur']]
+        dispos, treated, logs = importer_disponibilites(f, tuteurs_propres, st.session_state.co_jurys, mapping_config)
+        if dispos:
+            st.session_state.disponibilites = dispos
+            st.success(f"✅ {len(dispos)} profils importés.")
+            
+            missing = [t for t in tuteurs_propres if t not in dispos]
+            if missing:
+                st.info(f"ℹ️ {len(missing)} Tuteurs n'ont pas fourni de disponibilités. Ils seront considérés comme 'Toujours Disponibles'.")
+            
+            with st.expander("Voir logs"):
+                for l in logs: st.text(l)
         else:
-            st.write("Aperçu des disponibilités :")
-            st.dataframe(df.head(3))
-            
-            tuteurs_propres = [e['Tuteur'] for e in st.session_state.etudiants if e['Tuteur']]
-            dispos, treated, logs = importer_disponibilites(df, tuteurs_propres, st.session_state.co_jurys, mapping_config)
-            
-            if dispos:
-                st.session_state.disponibilites = dispos
-                st.success(f"✅ {len(dispos)} profils importés.")
-                with st.expander("Voir détails"):
-                    for l in logs: st.write(l)
-                    st.write("Reconnus :", treated)
-            else:
-                st.error("Aucune disponibilité reconnue.")
-                for l in logs: st.error(l)
+            st.error("Aucune disponibilité valide.")
+            for l in logs: st.error(l)
     if st.button("Suivant"): st.session_state.etape = 5; st.rerun()
 
 elif st.session_state.etape == 5:
     st.title("5. Génération")
-    with st.expander("Paramètres", expanded=True):
+    with st.expander("🎛️ Paramètres", expanded=True):
         c1, c2 = st.columns(2)
         n_iter = c1.slider("Itérations", 10, 200, 50)
         w_rand = c2.slider("Exploration", 0, 500, 100)
