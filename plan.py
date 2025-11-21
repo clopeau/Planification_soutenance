@@ -11,7 +11,7 @@ import random
 import unicodedata
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Planification Soutenances v5", layout="wide", page_icon="🎓")
+st.set_page_config(page_title="Planification Soutenances v6", layout="wide", page_icon="🎓")
 
 # --- STYLES CSS ---
 st.markdown("""
@@ -51,7 +51,6 @@ def normalize_text(text):
     """Supprime les accents et met en majuscules de façon universelle."""
     if not isinstance(text, str): return str(text)
     text = text.upper()
-    # Décompose les caractères accentués (ex: 'é' devient 'e' + accent) et garde seulement la lettre
     text = unicodedata.normalize('NFD', text).encode('ascii', 'ignore').decode("utf-8")
     return text
 
@@ -66,7 +65,6 @@ def lire_csv_robuste(uploaded_file):
         try:
             decoded = content.decode(enc)
             for sep in separators:
-                # On vérifie s'il y a assez de séparateurs dans la première ligne
                 if decoded.count(sep) > decoded.count('\n'):
                     return pd.read_csv(StringIO(decoded), sep=sep, engine='python'), None
         except: continue
@@ -77,57 +75,36 @@ def importer_etudiants(uploaded_file):
     df, error = lire_csv_robuste(uploaded_file)
     if error: return [], error
     
-    # Nettoyage des noms de colonnes
     raw_cols = list(df.columns)
-    # On crée un dictionnaire {NomNormalisé : NomRéel}
     cols_map_normalized = {normalize_text(c): c for c in raw_cols}
-    
     mapping = {}
     
-    # 1. Recherche NOM (Etudiant)
-    # On cherche "NOM" tout court, ou contenant NOM mais sans "ACCUEIL" (pour éviter 'Service d'accueil - Nom')
-    # et sans "REFERENT" (pour éviter 'Enseignant référent')
+    # Recherche intelligente des colonnes
     for c_norm, c_real in cols_map_normalized.items():
-        if c_norm == "NOM": # Correspondance exacte prioritaire
-            mapping['nom'] = c_real
-            break
+        if c_norm == "NOM": mapping['nom'] = c_real; break
     if 'nom' not in mapping:
         for c_norm, c_real in cols_map_normalized.items():
-            if "NOM" in c_norm and "PRENOM" not in c_norm and "REFERENT" not in c_norm and "ACCUEIL" not in c_norm and "ENSEIGNANT" not in c_norm:
-                mapping['nom'] = c_real
-                break
+            if "NOM" in c_norm and "PRENOM" not in c_norm and "REFERENT" not in c_norm and "ACCUEIL" not in c_norm:
+                mapping['nom'] = c_real; break
 
-    # 2. Recherche PRENOM
     for c_norm, c_real in cols_map_normalized.items():
-        if "PRENOM" in c_norm and "NOM" not in c_norm: # Juste PRENOM
-            mapping['prenom'] = c_real
-            break
-    if 'prenom' not in mapping: # Si colonnes "PRENOM NOM" ou autre
+        if "PRENOM" in c_norm and "NOM" not in c_norm: mapping['prenom'] = c_real; break
+    if 'prenom' not in mapping:
          for c_norm, c_real in cols_map_normalized.items():
-            if "PRENOM" in c_norm:
-                mapping['prenom'] = c_real
-                break
+            if "PRENOM" in c_norm: mapping['prenom'] = c_real; break
 
-    # 3. Recherche TUTEUR (Enseignant Référent)
-    # Doit contenir REFERENT ou ENSEIGNANT, mais PAS "ENTREPRISE"
     for c_norm, c_real in cols_map_normalized.items():
         if ("REFERENT" in c_norm or "ENSEIGNANT" in c_norm or "TUTEUR" in c_norm) and "ENTREPRISE" not in c_norm:
-            mapping['tuteur'] = c_real
-            break
+            mapping['tuteur'] = c_real; break
             
-    # 4. Recherche PAYS
     for c_norm, c_real in cols_map_normalized.items():
-        if "PAYS" in c_norm and "ACCUEIL" in c_norm: # Priorité "Service d'accueil - Pays"
-            mapping['pays'] = c_real
-            break
+        if "PAYS" in c_norm and "ACCUEIL" in c_norm: mapping['pays'] = c_real; break
     if 'pays' not in mapping:
         for c_norm, c_real in cols_map_normalized.items():
             if "PAYS" in c_norm: mapping['pays'] = c_real; break
 
-    # Vérification des colonnes obligatoires
     missing = [k for k in ['nom', 'tuteur'] if k not in mapping]
-    if missing:
-        return [], f"Colonnes introuvables : {missing}. <br>Colonnes lues : {raw_cols}"
+    if missing: return [], f"Colonnes introuvables : {missing}. <br>Colonnes lues : {raw_cols}"
 
     etudiants = []
     for _, row in df.iterrows():
@@ -136,14 +113,8 @@ def importer_etudiants(uploaded_file):
         tuteur = clean_str(row.get(mapping.get('tuteur')))
         pays = clean_str(row.get(mapping.get('pays'), ''))
         
-        # On ignore les lignes où il manque le nom ou le tuteur
         if nom and tuteur:
-            etudiants.append({
-                "Prénom": prenom,
-                "Nom": nom,
-                "Pays": pays,
-                "Tuteur": tuteur
-            })
+            etudiants.append({"Prénom": prenom, "Nom": nom, "Pays": pays, "Tuteur": tuteur})
             
     return etudiants, None
 
@@ -151,13 +122,11 @@ def importer_disponibilites(uploaded_file, tuteurs_connus, co_jurys_connus, hora
     df, error = lire_csv_robuste(uploaded_file)
     if error: return [], [], [error]
     
-    # Liste de référence propre
     personnes_reconnues = {p for p in (tuteurs_connus + co_jurys_connus) if p and str(p).lower() != 'nan'}
     if not personnes_reconnues: return {}, [], ["Aucun tuteur valide n'a été trouvé à l'étape 1."]
 
     date_cols_map = {} 
     for col in df.columns:
-        # Regex pour date JJ/MM/AAAA
         match = re.search(r"(\d{2}/\d{2}/\d{4}).*?(\d{2}:\d{2})", str(col))
         if match:
             d_csv, h_csv = match.group(1), match.group(2)
@@ -180,7 +149,6 @@ def importer_disponibilites(uploaded_file, tuteurs_connus, co_jurys_connus, hora
         if not nom_brut: continue
         best_match, best_score = None, 0
         for p in personnes_reconnues:
-            # Token Sort Ratio gère "NOM Prénom" vs "Prénom NOM"
             score = fuzz.token_sort_ratio(nom_brut.lower(), p.lower())
             if score > best_score: best_score, best_match = score, p
         
@@ -199,7 +167,7 @@ def importer_disponibilites(uploaded_file, tuteurs_connus, co_jurys_connus, hora
             
     return dispos_data, list(treated), logs
 
-# --- MOTEUR DE PLANIFICATION (GLOUTON + CONTIGUÏTÉ) ---
+# --- MOTEUR DE PLANIFICATION ---
 
 class SchedulerEngine:
     def __init__(self, etudiants, dates, nb_salles, duree, dispos, co_jurys_pool):
@@ -213,7 +181,6 @@ class SchedulerEngine:
         
         self.charge_tuteur = defaultdict(int)
         self.charge_cojury = defaultdict(int)
-        
         self.jury_occupied_times = defaultdict(set)
         self.jury_occupied_days = defaultdict(set)
         
@@ -251,19 +218,17 @@ class SchedulerEngine:
     def solve(self):
         planning = []
         unassigned = []
-        occupied_slots = set() # Par ID de créneau
-        busy_jurys_at_slot = defaultdict(set) # Par clé temps
+        occupied_slots = set()
+        busy_jurys_at_slot = defaultdict(set)
         
-        # 1. TRI DES ÉTUDIANTS
         student_queue = []
         for etu in self.etudiants:
             tut = etu['Tuteur']
             nb = sum(1 for v in self.dispos.get(tut, {}).values() if v)
             student_queue.append((nb, random.random(), etu))
         
-        student_queue.sort(key=lambda x: x[0]) # Les plus contraints en premier
+        student_queue.sort(key=lambda x: x[0])
         
-        # 2. PLACEMENT
         for _, _, etu in student_queue:
             tuteur = etu['Tuteur']
             placed = False
@@ -274,7 +239,6 @@ class SchedulerEngine:
                 if tuteur in busy_jurys_at_slot[slot['key']]: continue
                 if not self.is_available(tuteur, slot['key']): continue
                 
-                # Score TUTEUR
                 score = 0
                 t_start = slot['start']
                 t_prev = t_start - timedelta(minutes=self.duree)
@@ -286,19 +250,15 @@ class SchedulerEngine:
                 
                 candidate_slots.append((score, slot))
             
-            # Tri des slots : Score décroissant, puis chronologique
             candidate_slots.sort(key=lambda x: (x[0], x[1]['start'].timestamp(), random.random()), reverse=True)
             
             for score_slot, slot in candidate_slots:
-                
-                # Trouver CO-JURY
                 cj_candidates = []
                 for cj in self.all_possible_jurys:
                     if cj == tuteur: continue
                     if cj in busy_jurys_at_slot[slot['key']]: continue
                     if not self.is_available(cj, slot['key']): continue
                     
-                    # Score Co-jury
                     cj_score = 0
                     t_start = slot['start']
                     t_prev = t_start - timedelta(minutes=self.duree)
@@ -312,11 +272,9 @@ class SchedulerEngine:
                 
                 if not cj_candidates: continue
                 
-                # Tri Co-jury : Meilleur score de contiguïté, puis charge minimale
                 cj_candidates.sort(key=lambda x: (-x[0], x[1]))
                 best_cj = cj_candidates[0][2]
                 
-                # Placement
                 planning.append({
                     "Étudiant": f"{etu['Prénom']} {etu['Nom']}",
                     "Tuteur": tuteur, "Co-jury": best_cj,
@@ -421,7 +379,6 @@ elif st.session_state.etape == 4:
 
 elif st.session_state.etape == 5:
     st.title("5. Génération Optimisée")
-    st.markdown("💡 L'algorithme groupe les soutenances pour éviter les trous dans l'emploi du temps.")
     
     if st.button("Lancer la planification", type="primary"):
         eng = SchedulerEngine(
@@ -437,13 +394,59 @@ elif st.session_state.etape == 5:
         st.success(f"Planifié : {len(st.session_state.planning)} / Échecs : {len(st.session_state.failed)}")
         
         df = pd.DataFrame(st.session_state.planning)
-        tab1, tab2 = st.tabs(["Tableau", "Gantt"])
+        tab1, tab2 = st.tabs(["Tableau", "Gantt Enseignant"])
         with tab1: st.dataframe(df)
+        
         with tab2:
             if not df.empty:
-                df = df.sort_values(by=['Jour', 'Heure'])
-                fig = px.timeline(df, x_start="Début", x_end="Fin", y="Tuteur", color="Jour", text="Étudiant")
-                fig.update_yaxes(autorange="reversed")
+                # --- PREPARATION DU GANTT VUE ENSEIGNANT ---
+                gantt_data = []
+                for item in st.session_state.planning:
+                    # Entrée pour le Tuteur
+                    gantt_data.append({
+                        "Enseignant": item['Tuteur'],
+                        "Rôle": "Tuteur Principal",
+                        "Étudiant": item['Étudiant'],
+                        "Avec": f"co-jury: {item['Co-jury']}",
+                        "Début": item['Début'],
+                        "Fin": item['Fin'],
+                        "Jour": item['Jour'],
+                        "Salle": item['Salle'],
+                        # Astuce : Date fictive pour aligner les heures sur l'axe X
+                        "TimeStart": datetime(2000, 1, 1, item['Début'].hour, item['Début'].minute),
+                        "TimeEnd": datetime(2000, 1, 1, item['Fin'].hour, item['Fin'].minute)
+                    })
+                    # Entrée pour le Co-jury
+                    gantt_data.append({
+                        "Enseignant": item['Co-jury'],
+                        "Rôle": "Co-jury",
+                        "Étudiant": item['Étudiant'],
+                        "Avec": f"tuteur: {item['Tuteur']}",
+                        "Début": item['Début'],
+                        "Fin": item['Fin'],
+                        "Jour": item['Jour'],
+                        "Salle": item['Salle'],
+                        "TimeStart": datetime(2000, 1, 1, item['Début'].hour, item['Début'].minute),
+                        "TimeEnd": datetime(2000, 1, 1, item['Fin'].hour, item['Fin'].minute)
+                    })
+                
+                df_gantt = pd.DataFrame(gantt_data).sort_values(by="Enseignant")
+                
+                fig = px.timeline(
+                    df_gantt, 
+                    x_start="TimeStart", 
+                    x_end="TimeEnd", 
+                    y="Enseignant", 
+                    color="Rôle",
+                    facet_col="Jour", # Une colonne par jour
+                    hover_data=["Étudiant", "Avec", "Salle"],
+                    text="Étudiant",
+                    color_discrete_map={"Tuteur Principal": "#1f77b4", "Co-jury": "#ff7f0e"},
+                    height=600 + (len(df_gantt['Enseignant'].unique()) * 20)
+                )
+                
+                fig.update_xaxes(tickformat="%H:%M") # Afficher seulement l'heure
+                fig.update_yaxes(autorange="reversed") # A-Z de haut en bas
                 st.plotly_chart(fig, use_container_width=True)
         
         csv = df.to_csv(index=False, sep=';').encode('utf-8')
