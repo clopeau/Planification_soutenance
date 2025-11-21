@@ -1,8 +1,7 @@
 streamlit
 pandas
 plotly
-networkx
 numpy
-openpyxl
 thefuzz
-python-Levenshtein
+openpyxl
+XlsxWriter
