@@ -31,105 +31,71 @@ for key, value in DEFAULT_STATE.items():
     if key not in st.session_state: st.session_state[key] = value
 
 # --- EXPORT EXCEL AVANCE ---
+# --- EXPORT EXCEL AVANCE (Version openpyxl compatible) ---
 def generate_excel_planning(planning_data, nb_salles):
-    """Génère un fichier Excel formaté selon la demande (Feuille/Jour, Colonne/Salle)."""
+    """Génère un fichier Excel formaté (Feuille/Jour, Colonne/Salle) via openpyxl."""
     output = BytesIO()
     df = pd.DataFrame(planning_data)
     
-    # Créneaux théoriques (pour afficher même les trous)
+    # Créneaux théoriques
     slots_matin = ["08:00", "08:50", "09:40", "10:30", "11:20", "12:10"]
     slots_aprem = ["14:00", "14:50", "15:40", "16:30", "17:20"]
     
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        workbook = writer.book
-        
-        # --- STYLES ---
-        fmt_header = workbook.add_format({'bold': True, 'align': 'center', 'bg_color': '#D9E1F2', 'border': 1})
-        fmt_pause = workbook.add_format({'bold': True, 'align': 'center', 'bg_color': '#FFF2CC', 'border': 1})
-        fmt_cell = workbook.add_format({'border': 1, 'text_wrap': True, 'valign': 'vcenter'})
-        fmt_time = workbook.add_format({'bold': True, 'border': 1, 'align': 'center', 'valign': 'vcenter'})
-        fmt_room = workbook.add_format({'bold': True, 'align': 'center', 'font_size': 14, 'border': 1})
+    # Trier les jours
+    try:
+        unique_days = sorted(df['Jour'].unique(), key=lambda x: datetime.strptime(x.split(" ")[1], "%d/%m/%Y"))
+    except:
+        unique_days = sorted(df['Jour'].unique())
 
-        # Trier les jours pour l'ordre des onglets
-        # On essaye de parser la date pour trier, sinon alpha
-        try:
-            unique_days = sorted(df['Jour'].unique(), key=lambda x: datetime.strptime(x.split(" ")[1], "%d/%m/%Y"))
-        except:
-            unique_days = sorted(df['Jour'].unique())
-
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
         for jour in unique_days:
-            # Nom de l'onglet (max 31 chars, pas de caractères interdits)
             sheet_name = re.sub(r'[\\/*?:\[\]]', "", str(jour))[:31]
-            worksheet = workbook.add_worksheet(sheet_name)
+            
+            # On construit un DataFrame géant pour ce jour
+            # Structure : Index=Heure, Colonnes=(Salle 1 - Etu, Salle 1 - Jury, ..., Salle N - Etu, Salle N - Jury)
+            
+            cols = []
+            salles_theoriques = [f"Salle {i}" for i in range(1, nb_salles + 1)]
+            for s in salles_theoriques:
+                cols.append(f"{s} - Étudiant")
+                cols.append(f"{s} - Jury")
+            
+            # Création des lignes (Matin + Pause + Aprems)
+            rows = slots_matin + ["PAUSE"] + slots_aprem
+            df_export = pd.DataFrame(index=rows, columns=cols)
+            df_export = df_export.fillna("") # Remplir les vides
             
             df_jour = df[df['Jour'] == jour]
             
-            # Pour chaque salle, on crée un bloc de colonnes
-            # Salle 1 : Cols A,B,C. Salle 2 : Cols E,F,G (gap de 1)
-            salles = sorted(df['Salle'].unique())
-            # Si aucune soutenance dans une salle ce jour là, on veut quand même l'afficher
-            # On génère la liste théorique des salles
-            salles_theoriques = [f"Salle {i}" for i in range(1, nb_salles + 1)]
+            for idx, row_data in df_jour.iterrows():
+                heure_debut = row_data['Heure'].split(' - ')[0]
+                salle = row_data['Salle']
+                
+                # On ne traite que si la salle est dans nos salles théoriques (sécurité)
+                if salle not in salles_theoriques: continue
+                
+                col_etu = f"{salle} - Étudiant"
+                col_jury = f"{salle} - Jury"
+                
+                if heure_debut in df_export.index:
+                    etu_txt = f"{row_data['Étudiant']} ({row_data['Pays']})" if row_data['Pays'] else row_data['Étudiant']
+                    jury_txt = f"{row_data['Tuteur']} + {row_data['Co-jury']}"
+                    
+                    df_export.at[heure_debut, col_etu] = etu_txt
+                    df_export.at[heure_debut, col_jury] = jury_txt
             
-            col_offset = 0
+            # Ecriture dans l'onglet
+            df_export.to_excel(writer, sheet_name=sheet_name)
             
-            for salle in salles_theoriques:
-                # Entête Salle
-                worksheet.merge_range(0, col_offset, 0, col_offset + 2, salle, fmt_room)
-                
-                # Sous-titres
-                worksheet.write(1, col_offset, "Heure", fmt_header)
-                worksheet.write(1, col_offset + 1, "Etudiant", fmt_header)
-                worksheet.write(1, col_offset + 2, "Jury + Co-jury", fmt_header)
-                
-                # Largeur colonnes
-                worksheet.set_column(col_offset, col_offset, 8)     # Heure
-                worksheet.set_column(col_offset + 1, col_offset + 1, 30) # Etudiant
-                worksheet.set_column(col_offset + 2, col_offset + 2, 30) # Jury
-                
-                row_idx = 2
-                
-                # MATIN
-                for slot in slots_matin:
-                    # Chercher si qqn est planifié
-                    match = df_jour[(df_jour['Salle'] == salle) & (df_jour['Heure'].str.startswith(slot))]
-                    
-                    worksheet.write(row_idx, col_offset, slot, fmt_time)
-                    
-                    if not match.empty:
-                        data = match.iloc[0]
-                        etu_txt = f"{data['Étudiant']} ({data['Pays']})" if data['Pays'] else data['Étudiant']
-                        jury_txt = f"{data['Tuteur'].split(' ')[0]} + {data['Co-jury'].split(' ')[0]}" # Juste les noms de famille (approx)
-                        worksheet.write(row_idx, col_offset + 1, etu_txt, fmt_cell)
-                        worksheet.write(row_idx, col_offset + 2, jury_txt, fmt_cell)
-                    else:
-                        worksheet.write(row_idx, col_offset + 1, "", fmt_cell)
-                        worksheet.write(row_idx, col_offset + 2, "", fmt_cell)
-                    row_idx += 1
-                
-                # PAUSE
-                worksheet.merge_range(row_idx, col_offset, row_idx, col_offset + 2, "PAUSE", fmt_pause)
-                row_idx += 1
-                
-                # APRES-MIDI
-                for slot in slots_aprem:
-                    match = df_jour[(df_jour['Salle'] == salle) & (df_jour['Heure'].str.startswith(slot))]
-                    
-                    worksheet.write(row_idx, col_offset, slot, fmt_time)
-                    
-                    if not match.empty:
-                        data = match.iloc[0]
-                        etu_txt = f"{data['Étudiant']} ({data['Pays']})" if data['Pays'] else data['Étudiant']
-                        jury_txt = f"{data['Tuteur'].split(' ')[0]} + {data['Co-jury'].split(' ')[0]}"
-                        worksheet.write(row_idx, col_offset + 1, etu_txt, fmt_cell)
-                        worksheet.write(row_idx, col_offset + 2, jury_txt, fmt_cell)
-                    else:
-                        worksheet.write(row_idx, col_offset + 1, "", fmt_cell)
-                        worksheet.write(row_idx, col_offset + 2, "", fmt_cell)
-                    row_idx += 1
-                
-                # Décalage pour la prochaine salle (3 colonnes + 1 vide)
-                col_offset += 4
+            # Mise en forme basique avec openpyxl
+            worksheet = writer.sheets[sheet_name]
+            # Ajuster largeur colonnes
+            for i, col in enumerate(df_export.columns):
+                # +1 car l'index est la colonne A
+                column_letter = chr(66 + i) if i < 25 else 'AA' # Hack simple pour A, B, C...
+                # Openpyxl gère les largeurs via worksheet.column_dimensions
+                # Mais c'est complexe à scripter génériquement sans connaitre les lettres exactes
+                pass 
 
     return output.getvalue()
 
