@@ -11,7 +11,7 @@ import random
 import unicodedata
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Planification Soutenances v12 (CSV Fix)", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="Planification Soutenances v13 (Excel)", layout="wide", page_icon="📊")
 
 # --- STYLES ---
 st.markdown("""
@@ -34,73 +34,72 @@ for key, value in DEFAULT_STATE.items():
 # --- HELPERS ---
 def clean_str(val):
     if pd.isna(val) or str(val).lower() in ['nan', 'none', '']: return ""
-    # Nettoyage radical des sauts de ligne et espaces multiples
-    val = str(val).replace('\n', ' ').replace('\r', '').strip()
-    return " ".join(val.split())
+    val_str = str(val).strip()
+    return val_str.replace("\n", " ").replace("\r", "")
 
 def normalize_text(text):
     if not isinstance(text, str): return str(text)
-    text = text.upper()
+    text = text.upper().strip()
+    # Supprime les espaces insécables (\xa0) et autres caractères invisibles
+    text = "".join(text.split())
     text = unicodedata.normalize('NFD', text).encode('ascii', 'ignore').decode("utf-8")
     return text
 
-def lire_csv_robuste(uploaded_file):
-    """
-    Lecture renforcée pour gérer les CSV complexes (virgules dans les textes, sauts de ligne).
-    """
-    uploaded_file.seek(0)
-    content = uploaded_file.getvalue()
-    encodings = ['utf-8', 'latin-1', 'cp1252']
-    # Priorité à la virgule car votre fichier exemple utilise des virgules
-    separators = [',', ';'] 
+def lire_fichier_robuste(uploaded_file):
+    """Lit Excel ou CSV de manière robuste."""
+    filename = uploaded_file.name.lower()
     
-    for enc in encodings:
-        try:
-            decoded = content.decode(enc)
-            for sep in separators:
-                try:
-                    # engine='python' et quotechar='"' sont cruciaux pour votre fichier
-                    df = pd.read_csv(
-                        StringIO(decoded), 
-                        sep=sep, 
-                        engine='python', 
-                        quotechar='"',
-                        on_bad_lines='skip' # Ignore les lignes vraiment cassées
-                    )
-                    # Vérification simple : Si on a beaucoup de colonnes, c'est probablement bon
-                    if len(df.columns) > 3:
-                        return df, None
-                except: continue
-        except: continue
-            
-    return None, "Impossible de lire le fichier. Vérifiez qu'il est bien au format CSV (UTF-8 ou Latin-1)."
+    try:
+        if filename.endswith('.xlsx') or filename.endswith('.xls'):
+            return pd.read_excel(uploaded_file), None
+        
+        # Fallback CSV
+        uploaded_file.seek(0)
+        content = uploaded_file.getvalue()
+        encodings = ['utf-8', 'latin-1', 'cp1252']
+        separators = [',', ';'] 
+        
+        for enc in encodings:
+            try:
+                decoded = content.decode(enc)
+                for sep in separators:
+                    try:
+                        df = pd.read_csv(StringIO(decoded), sep=sep, engine='python', quotechar='"')
+                        if len(df.columns) > 1: return df, None
+                    except: continue
+            except: continue
+        return None, "Impossible de lire le fichier. Préférez le format Excel (.xlsx)."
+        
+    except Exception as e:
+        return None, f"Erreur technique : {str(e)}"
 
 # --- IMPORTERS ---
 def importer_etudiants(uploaded_file):
-    df, error = lire_csv_robuste(uploaded_file)
+    df, error = lire_fichier_robuste(uploaded_file)
     if error: return [], error
     
-    # Nettoyage des noms de colonnes (retirer espaces autour)
-    df.columns = [str(c).strip() for c in df.columns]
+    # Nettoyage des noms de colonnes (retirer espaces invisibles)
+    df.columns = [str(c).strip().replace('\xa0', ' ') for c in df.columns]
     
-    # Mapping STRICT basé sur votre fichier exemple
+    # Mapping
     col_map = {}
     
-    # Liste des variantes possibles pour vos colonnes
+    # Listes des variantes possibles
     targets = {
-        'nom': ['NOM', 'Nom', 'Nom étudiant'],
-        'prenom': ['PRENOM', 'Prénom', 'Prénom étudiant'],
-        'tuteur': ['Enseignant référent (NOM Prénom)', 'Enseignant référent', 'Tuteur', 'Enseignant'],
-        'pays': ['Service d’accueil – Pays', 'Pays', 'Pays étudiant']
+        'nom': ['NOM', 'Nom', 'Nom de famille'],
+        'prenom': ['PRENOM', 'Prénom'],
+        'tuteur': ['Enseignant référent (NOM Prénom)', 'Enseignant référent', 'Tuteur', 'Referent'],
+        'pays': ['Service d’accueil – Pays', 'Service d\'accueil - Pays', 'Pays', 'Pays d\'accueil']
     }
     
+    # Recherche exacte
     for key, candidates in targets.items():
         for cand in candidates:
             if cand in df.columns:
                 col_map[key] = cand
                 break
     
-    # Fallback (Recherche floue si les noms exacts ne sont pas trouvés)
+    # Recherche floue si non trouvé
     raw_cols = list(df.columns)
     cols_norm = {normalize_text(c): c for c in raw_cols}
     
@@ -111,7 +110,6 @@ def importer_etudiants(uploaded_file):
         for n, r in cols_norm.items():
             if ("REFERENT" in n or "ENSEIGNANT" in n) and "ENTREPRISE" not in n: col_map['tuteur'] = r; break
 
-    # Vérification critique
     missing = [k for k in ['nom', 'tuteur'] if k not in col_map]
     if missing: 
         return [], f"Colonnes introuvables : {missing}. <br>Colonnes détectées : {raw_cols}"
@@ -125,9 +123,8 @@ def importer_etudiants(uploaded_file):
         t = clean_str(row.get(col_map.get('tuteur')))
         y = clean_str(row.get(col_map.get('pays'), ''))
         
-        # SÉCURITÉ ANTI-DÉCALAGE
-        # Si le "Nom" ou le "Tuteur" est trop long (> 50 chars), c'est sûrement une description de stage qui a décalé
-        if len(t) > 50 or len(n) > 50:
+        # Protection anti-décalage (texte trop long dans une colonne Nom)
+        if len(t) > 60 or len(n) > 60:
             parsing_errors += 1
             continue 
             
@@ -136,18 +133,19 @@ def importer_etudiants(uploaded_file):
     
     msg = None
     if parsing_errors > 0:
-        msg = f"Attention : {parsing_errors} lignes ont été ignorées car elles semblaient mal formatées (texte trop long dans les colonnes noms)."
+        msg = f"Note : {parsing_errors} lignes ignorées (contenu trop long, probablement des descriptions)."
         
     return etudiants, msg
 
 def importer_disponibilites(uploaded_file, tuteurs_connus, co_jurys_connus, horaires_config):
-    df, error = lire_csv_robuste(uploaded_file)
+    df, error = lire_fichier_robuste(uploaded_file)
     if error: return [], [], [error]
     
     personnes_reconnues = {p for p in (tuteurs_connus + co_jurys_connus) if p and str(p).lower() != 'nan'}
     
     date_cols_map = {} 
     for col in df.columns:
+        # Recherche d'une date JJ/MM/AAAA
         match = re.search(r"(\d{2}/\d{2}/\d{4}).*?(\d{2}:\d{2})", str(col))
         if match:
             d_csv, h_csv = match.group(1), match.group(2)
@@ -172,13 +170,12 @@ def importer_disponibilites(uploaded_file, tuteurs_connus, co_jurys_connus, hora
             score = fuzz.token_sort_ratio(nom_brut.lower(), p.lower())
             if score > best_score: best_score, best_match = score, p
         
-        if best_score >= 65:
+        if best_score >= 60:
             final_name = best_match
             if final_name not in dispos_data: dispos_data[final_name] = {}
             for col_csv, key_app in date_cols_map.items():
                 val = row.get(col_csv, 0)
                 try:
-                    # Gestion robuste des "1", 1, 1.0
                     is_open = bool(int(float(val))) if pd.notna(val) else False
                     dispos_data[final_name][key_app] = is_open
                 except: pass
@@ -220,9 +217,7 @@ class SchedulerEngine:
         return slots
 
     def is_available(self, person, slot_key):
-        # MODE SECOURS : Si la personne n'est pas dans le fichier, on suppose qu'elle est dispo
-        # Sinon, on ne pourrait jamais placer les étudiants dont le tuteur a oublié de remplir le fichier
-        if person not in self.dispos: return True 
+        if person not in self.dispos: return True # Default TRUE
         return self.dispos[person].get(slot_key, False)
 
     def run_optimization(self):
@@ -314,9 +309,9 @@ with st.sidebar:
 
 if st.session_state.etape == 1:
     st.title("1. Import des Étudiants")
-    st.markdown("Le fichier doit être un CSV (séparateur virgule ou point-virgule). Le système détectera automatiquement les colonnes.")
+    st.markdown("Vous pouvez charger un fichier Excel (.xlsx) ou CSV.")
     
-    f = st.file_uploader("Fichier Étudiants", type=['csv', 'xlsx'])
+    f = st.file_uploader("Fichier Étudiants", type=['xlsx', 'csv'])
     if f:
         data, msg = importer_etudiants(f)
         if not data:
@@ -361,7 +356,7 @@ elif st.session_state.etape == 4:
     mapping_config = defaultdict(list)
     for s in eng.slots: k = s['key'].split(" | "); mapping_config[k[0]].append(k[1])
     
-    f = st.file_uploader("Fichier Disponibilités", type=['csv'])
+    f = st.file_uploader("Fichier Disponibilités (Excel ou CSV)", type=['xlsx', 'csv'])
     if f:
         tuteurs_propres = [e['Tuteur'] for e in st.session_state.etudiants if e['Tuteur']]
         dispos, treated, logs = importer_disponibilites(f, tuteurs_propres, st.session_state.co_jurys, mapping_config)
@@ -371,7 +366,7 @@ elif st.session_state.etape == 4:
             
             missing = [t for t in tuteurs_propres if t not in dispos]
             if missing:
-                st.info(f"ℹ️ {len(missing)} Tuteurs n'ont pas fourni de disponibilités. Ils seront considérés comme 'Toujours Disponibles'.")
+                st.info(f"ℹ️ {len(missing)} Tuteurs n'ont pas fourni de disponibilités. Ils seront considérés 'Toujours Disponibles'.")
             
             with st.expander("Voir logs"):
                 for l in logs: st.text(l)
