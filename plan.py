@@ -2,15 +2,14 @@ import streamlit as st
 from datetime import datetime, timedelta
 import pandas as pd
 import plotly.express as px
-# import networkx as nx # Non utilisé, peut être supprimé
-from itertools import combinations
 import numpy as np
 from collections import defaultdict
 import random
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
-from io import BytesIO, StringIO # StringIO pour le CSV
-from thefuzz import fuzz # Pour le rapprochement des noms
+from io import BytesIO, StringIO
+from thefuzz import fuzz
+import re
 
 st.set_page_config(page_title="Planification Soutenances", layout="wide")
 st.title("Planification Optimisée des Soutenances de Stage")
@@ -35,7 +34,6 @@ etapes_labels = {
 
 def afficher_navigation():
     st.sidebar.markdown("### 🧭 Navigation")
-    # Vérifier si st.session_state.etape est valide avant de l'utiliser dans index
     current_etape_index = 0
     if 'etape' in st.session_state and st.session_state.etape in etapes:
         current_etape_index = etapes.index(st.session_state.etape)
@@ -68,7 +66,7 @@ if "planning_final" not in st.session_state:
 if "nb_salles" not in st.session_state:
     st.session_state.nb_salles = 2
 if "duree_soutenance" not in st.session_state:
-    st.session_state.duree_soutenance = 50
+    st.session_state.duree_soutenance = 50 
 if "horaires_par_jour" not in st.session_state: 
     st.session_state.horaires_par_jour = {}
 
@@ -94,10 +92,8 @@ class AlgorithmeGenetique:
         self.nb_etudiants = len(planificateur.etudiants) if planificateur.etudiants else 0
         self.creneaux_valides_par_etudiant = self._precalculer_creneaux_valides() if self.nb_etudiants > 0 else {}
 
-
         self.historique_fitness = []
         self.meilleure_solution = Individu(genes=[-1]*self.nb_etudiants) if self.nb_etudiants > 0 else Individu(genes=[])
-
 
     def _precalculer_creneaux_valides(self):
         creneaux_valides = {}
@@ -137,12 +133,11 @@ class AlgorithmeGenetique:
                 if idx_creneau_cand >= len(self.creneaux): continue
                 creneau_cand = self.creneaux[idx_creneau_cand]
 
-                # Vérifier si le créneau (salle incluse via son ID unique) est déjà pris
-                if creneau_cand['id'] in creneaux_occupes_par_id: # L'ID du créneau est unique par salle/heure
+                if creneau_cand['id'] in creneaux_occupes_par_id:
                     continue
                 
                 tuteur_etu = self.planificateur.etudiants[idx_etu]["Tuteur"]
-                moment_cand = creneau_cand['moment'] # Clé jour_heure
+                moment_cand = creneau_cand['moment']
                 
                 if tuteur_etu in jurys_occupes_par_moment[moment_cand]:
                     continue
@@ -158,8 +153,8 @@ class AlgorithmeGenetique:
                         break
                 
                 if co_jury_final_pour_gen:
-                    genes[idx_etu] = idx_creneau_cand # Assigner l'index du créneau (qui inclut la salle)
-                    creneaux_occupes_par_id.add(creneau_cand['id']) # Marquer l'ID du créneau (salle+heure)
+                    genes[idx_etu] = idx_creneau_cand
+                    creneaux_occupes_par_id.add(creneau_cand['id'])
                     jurys_occupes_par_moment[moment_cand].add(tuteur_etu)
                     jurys_occupes_par_moment[moment_cand].add(co_jury_final_pour_gen)
                     break
@@ -187,22 +182,19 @@ class AlgorithmeGenetique:
         score_balance_roles = 0 
         personnes_eligibles_balance = set(self.planificateur.tuteurs_referents) & set(self.planificateur.co_jurys)
         
-        # CONTRAINTE IMPERATIVE DE PARITE DES ROLES
         contrainte_parite_roles_violee_strict = False
-        max_difference_toleree_strict = 0 # Doit être strictement égal pour la contrainte impérative
+        max_difference_toleree_strict = 0 
 
         for jury, counts in roles_par_jury.items():
             if jury in personnes_eligibles_balance:
                 difference = abs(counts['tuteur'] - counts['cojury'])
-                if difference > max_difference_toleree_strict: # Contrainte impérative
+                if difference > max_difference_toleree_strict: 
                     contrainte_parite_roles_violee_strict = True
-                    # La pénalité sera appliquée globalement si cette variable est True
                 
-                # Pour la partie "soft" de la fitness (bonus/pénalité non bloquante)
                 penalite_balance_roles += (difference ** 2) * 20 
                 if difference == 0:
                     score_balance_roles += 100 
-                elif difference == 1: # Si on tolérait un écart de 1 pour le score "soft"
+                elif difference == 1:
                     score_balance_roles += 30
 
 
@@ -220,16 +212,15 @@ class AlgorithmeGenetique:
 
         if total_conflits > 0:
             fitness_finale = -500_000 - (total_conflits * 1000) 
-        elif contrainte_parite_roles_violee_strict: # Appliqué seulement si pas d'autres conflits
-            fitness_finale = -1_000_000 - penalite_balance_roles # Pénalité massive si parité impérative violée
-        else: # Pas de conflits, pas de violation de parité impérative
+        elif contrainte_parite_roles_violee_strict: 
+            fitness_finale = -1_000_000 - penalite_balance_roles
+        else: 
             if nb_soutenances >= nb_total_etudiants * 0.9: 
                 fitness_finale += 2000 
 
         individu.fitness = fitness_finale
         individu.soutenances_planifiees = nb_soutenances
-        individu.conflits = total_conflits # Ce 'conflits' inclut salle et jury, pas la parité.
-                                         # On pourrait ajouter un champ `parite_violee` à l'individu si besoin.
+        individu.conflits = total_conflits
         return individu
 
     def _analyser_conflits_detailles(self, planning):
@@ -262,7 +253,7 @@ class AlgorithmeGenetique:
         return conflits_salle, conflits_jury
 
     def _calculer_equilibrage_charge(self, planning):
-        if not planning: return 0.0 # Retourner un float pour la cohérence
+        if not planning: return 0.0 
         charges = defaultdict(int)
         for soutenance in planning:
             charges[soutenance['Tuteur']] += 1
@@ -271,13 +262,10 @@ class AlgorithmeGenetique:
         if not charges or len(charges) <= 1 : return 10.0 
         
         valeurs_charges = np.array(list(charges.values()))
-        # Moyenne et variance sont déjà gérées par np.var si on passe ddof=0 (par défaut pour population)
         variance = np.var(valeurs_charges) 
         return max(0.0, 10.0 - np.sqrt(variance)) 
 
     def _calculer_bonus_alternance(self, planning): 
-        bonus = 0.0 # Float
-        # ... (logique inchangée mais retourne un float)
         jurys_par_periode = {'matin': defaultdict(set), 'apres_midi': defaultdict(set)} 
         for soutenance in planning:
             jour = soutenance['Jour']
@@ -294,40 +282,16 @@ class AlgorithmeGenetique:
             total_jurys_alternant += len(jurys_alternant_ce_jour)
         return float(total_jurys_alternant * 1.0)
 
-
     def croisement_intelligent(self, parent1: Individu, parent2: Individu) -> Tuple[Individu, Individu]:
         len_genes = len(parent1.genes)
         if len_genes == 0: 
              return Individu(genes=[]), Individu(genes=[])
 
-        enfant1_genes = genes_p1_copy = parent1.genes[:] # Copie pour manipulation
-        enfant2_genes = genes_p2_copy = parent2.genes[:] # Copie pour manipulation
+        enfant1_genes_final = [-1] * len_genes
+        enfant2_genes_final = [-1] * len_genes
         
         point_croisement = random.randint(1, len_genes - 1) if len_genes > 1 else 0
 
-        # Échange simple pour la première partie (plus robuste)
-        for i in range(point_croisement):
-            enfant1_genes[i] = parent2.genes[i] # Prend de P2
-            enfant2_genes[i] = parent1.genes[i] # Prend de P1
-        # La deuxième partie reste celle du parent original pour l'instant
-
-        # Tenter de résoudre les conflits de créneaux dupliqués après le croisement initial
-        # Cette partie est complexe à rendre parfaitement valide et peut être simplifiée
-        # ou gérée par la mutation et la sélection.
-        # Pour l'instant, on se contente du croisement simple, la fitness et la mutation aideront.
-
-        # Une approche plus simple pour le croisement :
-        # enfant1_genes = parent1.genes[:point_croisement] + parent2.genes[point_croisement:]
-        # enfant2_genes = parent2.genes[:point_croisement] + parent1.genes[point_croisement:]
-        # Puis, on pourrait avoir une étape de "réparation" pour les doublons de créneaux,
-        # ou laisser la mutation/sélection s'en charger.
-        # La version actuelle avec vérification de creneaux_valides_par_etudiant est déjà assez avancée.
-
-        # Reprenons la logique de croisement intelligent avec vérification de validité et unicité
-        enfant1_genes_final = [-1] * len_genes
-        enfant2_genes_final = [-1] * len_genes
-
-        # Partie 1 de parent1 pour enfant1, parent2 pour enfant2
         for i in range(point_croisement):
             enfant1_genes_final[i] = parent1.genes[i]
             enfant2_genes_final[i] = parent2.genes[i]
@@ -335,28 +299,27 @@ class AlgorithmeGenetique:
         creneaux_pris_e1 = set(g for g in enfant1_genes_final[:point_croisement] if g != -1)
         creneaux_pris_e2 = set(g for g in enfant2_genes_final[:point_croisement] if g != -1)
 
-        # Partie 2 : essayer de prendre de l'autre parent si valide et non pris
         for i in range(point_croisement, len_genes):
-            # Enfant 1 prend de Parent 2
+            # Enfant 1
             gene_candidat_p2 = parent2.genes[i]
             if gene_candidat_p2 != -1 and gene_candidat_p2 not in creneaux_pris_e1 and \
                (i in self.creneaux_valides_par_etudiant and gene_candidat_p2 in self.creneaux_valides_par_etudiant[i]):
                 enfant1_genes_final[i] = gene_candidat_p2
                 creneaux_pris_e1.add(gene_candidat_p2)
-            else: # Sinon, essayer de garder de Parent 1
+            else: 
                 gene_candidat_p1 = parent1.genes[i]
                 if gene_candidat_p1 != -1 and gene_candidat_p1 not in creneaux_pris_e1 and \
                    (i in self.creneaux_valides_par_etudiant and gene_candidat_p1 in self.creneaux_valides_par_etudiant[i]):
                     enfant1_genes_final[i] = gene_candidat_p1
                     creneaux_pris_e1.add(gene_candidat_p1)
 
-            # Enfant 2 prend de Parent 1
+            # Enfant 2
             gene_candidat_p1_e2 = parent1.genes[i]
             if gene_candidat_p1_e2 != -1 and gene_candidat_p1_e2 not in creneaux_pris_e2 and \
                (i in self.creneaux_valides_par_etudiant and gene_candidat_p1_e2 in self.creneaux_valides_par_etudiant[i]):
                 enfant2_genes_final[i] = gene_candidat_p1_e2
                 creneaux_pris_e2.add(gene_candidat_p1_e2)
-            else: # Sinon, essayer de garder de Parent 2
+            else: 
                 gene_candidat_p2_e2 = parent2.genes[i]
                 if gene_candidat_p2_e2 != -1 and gene_candidat_p2_e2 not in creneaux_pris_e2 and \
                    (i in self.creneaux_valides_par_etudiant and gene_candidat_p2_e2 in self.creneaux_valides_par_etudiant[i]):
@@ -371,48 +334,37 @@ class AlgorithmeGenetique:
 
         for i in range(len(individu.genes)):
             if random.random() < self.taux_mutation:
-                # S'assurer que l'étudiant i est valide
                 if i >= self.nb_etudiants: continue 
                 
                 creneaux_possibles_pour_cet_etudiant = self.creneaux_valides_par_etudiant.get(i, [])
                 if not creneaux_possibles_pour_cet_etudiant: continue
 
                 gene_actuel_de_i = individu.genes[i]
-                
-                # Créneaux utilisés par les AUTRES étudiants
                 creneaux_utilises_par_autres = set(
                     individu.genes[j] for j in range(len(individu.genes)) if j != i and individu.genes[j] != -1
                 )
-
-                # Créneaux valides pour cet étudiant ET non utilisés par d'autres
                 options_de_mutation_libres = [
                     c for c in creneaux_possibles_pour_cet_etudiant if c not in creneaux_utilises_par_autres
                 ]
 
                 if not options_de_mutation_libres:
-                    # Si l'étudiant est planifié mais son créneau cause un conflit (pris par un autre)
-                    # ou si son créneau n'est plus valide pour lui (peu probable si bien généré)
-                    # Alors on le déplanifie.
                     if gene_actuel_de_i != -1 and gene_actuel_de_i in creneaux_utilises_par_autres :
                          individu.genes[i] = -1
-                    # Sinon (non planifié et pas d'option, ou planifié sans conflit et pas d'autre option), on ne change rien.
                     continue
 
-                if gene_actuel_de_i == -1: # Était non planifié, on essaie de le planifier
+                if gene_actuel_de_i == -1: 
                     individu.genes[i] = random.choice(options_de_mutation_libres)
-                else: # Était planifié, on essaie de changer de créneau (si possible vers un autre)
-                    # On préfère un NOUVEAU créneau libre s'il existe
+                else: 
                     nouveaux_creneaux_libres = [c for c in options_de_mutation_libres if c != gene_actuel_de_i]
                     if nouveaux_creneaux_libres:
                         individu.genes[i] = random.choice(nouveaux_creneaux_libres)
-                    elif gene_actuel_de_i in options_de_mutation_libres : # Seule option libre est son créneau actuel
-                        pass # On ne change pas
-                    else: # Son créneau actuel n'est plus une option libre (conflit), donc déplanifier
+                    elif gene_actuel_de_i in options_de_mutation_libres : 
+                        pass 
+                    else: 
                         individu.genes[i] = -1
         return individu
 
     def evoluer(self) -> Tuple[List[Dict], Dict]:
-        # ... (Logique d'évolution, globalement inchangée mais s'assurer des gardes pour population vide)
         population = []
         if self.nb_etudiants == 0:
              st.sidebar.warning("AG: Aucun étudiant, arrêt.")
@@ -422,24 +374,21 @@ class AlgorithmeGenetique:
             individu = self.generer_individu_intelligent()
             population.append(self.calculer_fitness_amelioree(individu))
 
-        if not population or not any(ind.genes != [-1]*self.nb_etudiants for ind in population) : # Si tous sont vides
-            st.sidebar.warning("AG: Population initiale non viable.")
-            self.meilleure_solution = Individu(genes=[-1]*self.nb_etudiants) # S'assurer qu'il y a une solution par défaut
-            # return [], self._stats_vides() # On peut laisser continuer pour voir si la mutation aide.
+        if not population or not any(ind.genes != [-1]*self.nb_etudiants for ind in population) :
+            st.sidebar.warning("AG: Population initiale difficile à construire.")
+            self.meilleure_solution = Individu(genes=[-1]*self.nb_etudiants)
 
-        # S'assurer que meilleure_solution est initialisée même si la population est problématique
         if population:
             self.meilleure_solution = max(population, key=lambda x: x.fitness, default=self.meilleure_solution)
-        else: # Si la population est vide après la première génération.
-            st.sidebar.error("AG: Population vide après initialisation et évaluation.")
+        else: 
             return [], self._stats_vides()
 
-
         stagnation = 0
+        progress_bar = st.sidebar.progress(0)
+        
         for generation in range(self.nb_generations):
-            if not population: # Double check
-                st.sidebar.error(f"AG: Population vide à la gen {generation}, arrêt prématuré.")
-                break
+            if not population: break
+            progress_bar.progress((generation + 1) / self.nb_generations)
 
             nouvelle_population = []
             population_triee = sorted(population, key=lambda x: x.fitness, reverse=True)
@@ -457,22 +406,15 @@ class AlgorithmeGenetique:
                         if len(nouvelle_population) < self.taille_population:
                              nouvelle_population.append(self.mutation_adaptative(enfant2))
                 else: 
-                    if population: # Pour random.choice
-                        individu_choisi_pour_mutation_ou_copie = random.choice(population)
-                        nouvelle_population.append(self.mutation_adaptative(individu_choisi_pour_mutation_ou_copie))
-                    else: # Si la population s'est vidée, on ne peut rien faire
-                        break 
+                    if population:
+                        individu_choisi = random.choice(population)
+                        nouvelle_population.append(self.mutation_adaptative(individu_choisi))
+                    else: break 
             
-            if not nouvelle_population: # Si la construction a échoué
-                 st.sidebar.warning(f"AG: Nouvelle population vide à la gen {generation}.")
-                 break # Sortir de la boucle des générations
-
             nouvelle_population = nouvelle_population[:self.taille_population] 
             population = [self.calculer_fitness_amelioree(ind) for ind in nouvelle_population]
 
-            if not population: 
-                st.sidebar.error(f"AG: Population vide après évaluation à la gen {generation}.")
-                break 
+            if not population: break 
 
             meilleur_actuel_gen = max(population, key=lambda x: x.fitness, default=self.meilleure_solution)
 
@@ -484,15 +426,11 @@ class AlgorithmeGenetique:
 
             if stagnation > max(30, self.nb_generations * 0.15) and generation < self.nb_generations * 0.85: 
                 nb_a_remplacer = int(self.taille_population * 0.33) 
-                # Garder les meilleurs, remplacer une partie des moins bons par de nouveaux individus
                 population_meilleurs_conserves = sorted(population, key=lambda x: x.fitness, reverse=True)[:-nb_a_remplacer]
-                nouveaux_individus_pour_diversite = [self.calculer_fitness_amelioree(self.generer_individu_intelligent()) for _ in range(nb_a_remplacer)]
-                population = population_meilleurs_conserves + nouveaux_individus_pour_diversite
-                random.shuffle(population) # Important après modification
+                nouveaux = [self.calculer_fitness_amelioree(self.generer_individu_intelligent()) for _ in range(nb_a_remplacer)]
+                population = population_meilleurs_conserves + nouveaux
+                random.shuffle(population)
                 stagnation = 0
-                if self.nb_generations > 20 : 
-                    st.sidebar.text(f"AG: Diversification à gén. {generation+1}")
-
 
             fitness_moyenne_gen = np.mean([ind.fitness for ind in population]) if population else self.meilleure_solution.fitness
             self.historique_fitness.append({
@@ -502,9 +440,8 @@ class AlgorithmeGenetique:
                 'soutenances_max': self.meilleure_solution.soutenances_planifiees,
                 'conflits_min': self.meilleure_solution.conflits
             })
-            if (generation+1) % max(1, (self.nb_generations // 10)) == 0 or generation == self.nb_generations -1 : 
-                 st.sidebar.text(f"G:{generation+1} FMax:{self.meilleure_solution.fitness:.0f} S:{self.meilleure_solution.soutenances_planifiees} C:{self.meilleure_solution.conflits}")
 
+        progress_bar.empty()
         planning_final = self.decoder_individu(self.meilleure_solution)
         taux_reussite_final = (self.meilleure_solution.soutenances_planifiees / self.nb_etudiants) if self.nb_etudiants > 0 else 0
         statistiques = {
@@ -517,7 +454,7 @@ class AlgorithmeGenetique:
         }
         return planning_final, statistiques
     
-    def _stats_vides(self): # Helper pour retourner des stats vides
+    def _stats_vides(self):
         return {'generations': 0, 'fitness_finale': 0, 'soutenances_planifiees': 0, 
                 'conflits': 0, 'taux_reussite': 0, 'historique': []}
 
@@ -525,20 +462,18 @@ class AlgorithmeGenetique:
     def selection_tournament(self, population: List[Individu], k=3) -> Individu:
         if not population:
             return Individu(genes=[-1]*self.nb_etudiants if self.nb_etudiants > 0 else [])
-        
         k_valide = min(k, len(population))
-        if k_valide == 0 : return population[0] # Devrait être impossible si population non vide
-
+        if k_valide == 0 : return population[0]
         participants = random.sample(population, k_valide)
         return max(participants, key=lambda x: x.fitness)
 
     def decoder_individu(self, individu: Individu) -> List[Dict]:
         planning = []
-        if not individu or not individu.genes or not self.creneaux or not self.planificateur.etudiants: # Gardes
+        if not individu or not individu.genes or not self.creneaux or not self.planificateur.etudiants:
             return planning
 
         jurys_occupes_decode_moment = defaultdict(set) 
-        creneaux_salles_decode_ids = set() # Utiliser l'ID unique du créneau (salle+heure)
+        creneaux_salles_decode_ids = set()
 
         for idx_etu, idx_creneau_gene in enumerate(individu.genes):
             if idx_creneau_gene == -1 or idx_creneau_gene >= len(self.creneaux):
@@ -549,8 +484,8 @@ class AlgorithmeGenetique:
             creneau_obj_decode = self.creneaux[idx_creneau_gene]
             tuteur_principal = etudiant_obj["Tuteur"]
             
-            moment_str_decode = creneau_obj_decode['moment'] # Jour_Heure
-            id_creneau_salle_decode = creneau_obj_decode['id'] # ID unique pour Jour_Heure_Salle
+            moment_str_decode = creneau_obj_decode['moment']
+            id_creneau_salle_decode = creneau_obj_decode['id']
 
             if id_creneau_salle_decode in creneaux_salles_decode_ids:
                 continue 
@@ -559,10 +494,9 @@ class AlgorithmeGenetique:
 
             co_jurys_possibles_decode = self.planificateur.trouver_co_jurys_disponibles(
                 tuteur_principal, creneau_obj_decode['jour'], creneau_obj_decode['heure']
-            ) # Cette méthode utilise déjà le tri par balance des rôles
+            )
             
             co_jury_final_choisi = None
-            # random.shuffle(co_jurys_possibles_decode) # Le tri est déjà fait, on prend le premier dispo
             for cj_cand_decode in co_jurys_possibles_decode:
                 if cj_cand_decode not in jurys_occupes_decode_moment[moment_str_decode]:
                     co_jury_final_choisi = cj_cand_decode
@@ -605,7 +539,7 @@ class PlanificationOptimiseeV2:
 
         for jour_obj in self.dates:
             jour_str_app = jour_obj.strftime("%A %d/%m/%Y")
-            # Modification de la période du matin pour finir à 12h10 au lieu de 13h00
+            # Périodes alignées sur le CSV (Matin 8h-12h10, Aprem 14h-18h10)
             for periode in [("08:00", "12:10"), ("14:00", "18:10")]: 
                 try:
                     debut_dt_obj = datetime.strptime(periode[0], "%H:%M").time()
@@ -665,7 +599,7 @@ class PlanificationOptimiseeV2:
         for etudiant_obj_classique in etudiants_melanges:
             tuteur_ref_classique = etudiant_obj_classique["Tuteur"]
             soutenance_planifiee_etu_classique = False
-            creneaux_melanges_classique = creneaux.copy() # Re-mélanger pour chaque étudiant donne plus de chances
+            creneaux_melanges_classique = creneaux.copy()
             random.shuffle(creneaux_melanges_classique)
 
             for creneau_obj_classique in creneaux_melanges_classique:
@@ -677,7 +611,7 @@ class PlanificationOptimiseeV2:
                     tuteur_ref_classique, creneau_obj_classique['jour'], creneau_obj_classique['heure']
                 )
                 co_jury_choisi_classique = None
-                for cj_cand_classique in co_jurys_possibles_classique: # Déjà trié par balance/charge
+                for cj_cand_classique in co_jurys_possibles_classique:
                     if cj_cand_classique not in jurys_par_moment_app[creneau_obj_classique['moment']]:
                         co_jury_choisi_classique = cj_cand_classique
                         break
@@ -703,7 +637,6 @@ class PlanificationOptimiseeV2:
             
             if not soutenance_planifiee_etu_classique:
                 non_planifies_count += 1
-                # st.sidebar.warning(f"Classique: {etudiant_obj_classique['Prénom']} non planifié.") # Peut être trop verbeux
         
         return planning, non_planifies_count
 
@@ -715,11 +648,10 @@ class PlanificationOptimiseeV2:
         run_ag = False
         if utiliser_genetique_ui:
             run_ag = True
-        elif nb_etudiants_total > 0 and taux_reussite_classique < 0.85 and planning_classique : # Lancer AG si <85% et si le classique a produit quelque chose
+        elif nb_etudiants_total > 0 and taux_reussite_classique < 0.85 and planning_classique :
             run_ag = True
-        elif nb_etudiants_total > 0 and not planning_classique: # Lancer AG si le classique n'a rien produit
+        elif nb_etudiants_total > 0 and not planning_classique:
             run_ag = True
-
 
         if run_ag:
             st.info("🧬 Lancement de l'optimisation génétique...")
@@ -731,7 +663,6 @@ class PlanificationOptimiseeV2:
             config_ag['taille_population'] = max(20, config_ag['taille_population']) 
             config_ag['nb_generations'] = max(20, config_ag['nb_generations'])     
 
-            # Si le planificateur (self) n'a pas d'étudiants, l'AG ne peut pas fonctionner
             if not self.etudiants:
                 st.warning("AG non lancé : aucun étudiant à planifier.")
                 return planning_classique, non_planifies_classique, None
@@ -739,36 +670,25 @@ class PlanificationOptimiseeV2:
             ag_instance = AlgorithmeGenetique(self, **config_ag)
             planning_genetique, stats_ag = ag_instance.evoluer()
             
-            # S'assurer que stats_ag est un dictionnaire même si evoluer retourne None par erreur
-            if stats_ag is None: stats_ag = ag_instance._stats_vides() # Utiliser le helper
+            if stats_ag is None: stats_ag = ag_instance._stats_vides()
             stats_ag['amelioration_valeur'] = 0 
 
-            # Comparaison basée sur le nombre de soutenances planifiées ET la fitness (si conflits/parité sont gérés par fitness)
-            classique_score_comparaison = len(planning_classique) # Score simple pour le classique
-            genetique_score_comparaison = len(planning_genetique) # Score simple pour l'AG
-
-            # On pourrait aussi calculer une "fitness" pour le planning classique pour une meilleure comparaison
-            # Mais pour l'instant, on se base sur le nombre de planifiés et la fitness de l'AG
+            classique_score_comparaison = len(planning_classique)
+            genetique_score_comparaison = len(planning_genetique)
 
             if genetique_score_comparaison > classique_score_comparaison:
                 st.success(f"✅ AG a amélioré le nombre de soutenances: {len(planning_genetique)} vs {len(planning_classique)} (classique)")
                 stats_ag['amelioration_valeur'] = len(planning_genetique) - len(planning_classique)
                 return planning_genetique, nb_etudiants_total - len(planning_genetique), stats_ag
             elif genetique_score_comparaison == classique_score_comparaison and stats_ag.get('fitness_finale', -float('inf')) > -100000 : 
-                 # Si même nombre, on peut regarder la fitness ou d'autres critères
-                 # Pour l'instant, on favorise l'AG s'il a bien tourné
                  st.info(f"AG a planifié autant ({len(planning_genetique)}). Résultat de l'AG conservé (Fitness: {stats_ag.get('fitness_finale', 0.0):.0f}).")
                  return planning_genetique, nb_etudiants_total - len(planning_genetique), stats_ag
-            else: # Classique est meilleur ou AG n'a pas bien tourné
-                st.info(f"ℹ️ AG n'a pas amélioré ({len(planning_genetique)} planifiées, fitness {stats_ag.get('fitness_finale', 0.0):.0f}). Résultat classique ({len(planning_classique)}) conservé.")
+            else:
+                st.info(f"ℹ️ AG n'a pas amélioré ({len(planning_genetique)} planifiées). Résultat classique ({len(planning_classique)}) conservé.")
                 return planning_classique, non_planifies_classique, stats_ag 
         
         return planning_classique, non_planifies_classique, None
 
-
-    def afficher_diagnostics(self, planning, tentatives_par_etudiant):
-        # (Optionnel)
-        pass
 
     def verifier_conflits(self, planning): 
         conflits_messages = []
@@ -800,221 +720,182 @@ class PlanificationOptimiseeV2:
                     conflits_messages.append(f"Jury: {jury} à {moment} pour {etudiants_str}")
         return conflits_messages
 
-
-# --- Fonctions d'importation des disponibilités ---
-def importer_disponibilites_excel_simple_header(
-                                uploaded_file, 
-                                horaires_par_jour_app_config: Dict[str, List[str]], 
-                                tous_tuteurs_app: List[str], 
-                                co_jurys_app: List[str],
-                                score_matching_seuil=75): # J'ai remis 75 comme vous l'aviez
-    messages_succes, messages_erreur, messages_warning = [], [], []
-    personnes_traitees_import, personnes_reconnues_app_set = set(), set(tous_tuteurs_app + co_jurys_app)
-    map_creneaux_app, cles_dispo_valides_app_set = {}, set()
-
-    for jour_app_str, creneaux_list_app in horaires_par_jour_app_config.items():
-        try: date_part_app = jour_app_str.split(" ")[1]
-        except (IndexError, ValueError): continue
-        for creneau_app_str in creneaux_list_app: 
-            cles_dispo_valides_app_set.add(f"{jour_app_str} | {creneau_app_str}")
-            try:
-                h_debut, h_fin = [h.strip() for h in creneau_app_str.split(" - ")]
-                map_creneaux_app[f"{date_part_app} {h_debut} à {h_fin}"] = f"{jour_app_str} | {creneau_app_str}"
-            except ValueError: continue
-
-    if not uploaded_file: return [], ["Aucun fichier Excel fourni."], []
+# --- Fonction d'importation ETUDIANTS (CSV) ---
+def importer_etudiants_csv(uploaded_file):
+    etudiants_list = []
     try:
-        df_excel = pd.read_excel(uploaded_file, header=0, sheet_name=0)
-        if df_excel.empty: return [], ["Fichier Excel vide."], []
+        df = pd.read_csv(uploaded_file, sep=';', encoding='utf-8', on_bad_lines='skip')
+    except UnicodeDecodeError:
+        uploaded_file.seek(0)
+        df = pd.read_csv(uploaded_file, sep=';', encoding='latin-1', on_bad_lines='skip')
+    except Exception as e:
+        return [], f"Erreur lecture CSV: {e}"
+
+    # Nettoyage des colonnes vides (ex: ;;;; à la fin)
+    df.dropna(how='all', inplace=True)
+    
+    required_cols_map = {
+        'PRENOM': 'Prénom',
+        'NOM': 'Nom',
+        'Pays': 'Pays',
+        'Enseignant référent (NOM Prénom)': 'Tuteur'
+    }
+    
+    # Vérification sommaire des colonnes
+    missing = [c for c in required_cols_map.keys() if c not in df.columns]
+    if missing:
+        return [], f"Colonnes manquantes dans le CSV: {missing}"
+
+    for _, row in df.iterrows():
+        # Extraction et nettoyage
+        prenom = str(row.get('PRENOM', '')).strip()
+        nom = str(row.get('NOM', '')).strip()
+        pays = str(row.get('Pays', '')).strip()
+        tuteur = str(row.get('Enseignant référent (NOM Prénom)', '')).strip()
         
-        col_ens_nom = df_excel.columns[0]
-        original_col_names = df_excel.columns.tolist()
-        cleaned_col_map = {}
+        if not prenom or not nom: continue # Ignorer lignes vides
 
-        for col_raw in original_col_names[2:]: 
-            col_clean = str(col_raw).replace(" à\xa0 ", " à ").replace("\xa0", " ").strip(" .")
-            parts = col_clean.split(" ")
-            if len(parts) >= 4:
-                try:
-                    idx_a = parts.index("à")
-                    if idx_a > 0 and idx_a + 1 < len(parts):
-                        # S'assurer que parts[1] et parts[idx_a + 1] sont bien des heures
-                        # Une vérification plus robuste pourrait utiliser regex ici
-                        cle_excel_match = f"{parts[0]} {parts[1]} à {parts[idx_a + 1]}"
-                        if cle_excel_match in map_creneaux_app:
-                            cleaned_col_map[col_raw] = map_creneaux_app[cle_excel_match]
-                except ValueError: pass # "à" non trouvé ou autre problème de format
+        etudiants_list.append({
+            "Prénom": prenom,
+            "Nom": nom,
+            "Pays": pays,
+            "Tuteur": tuteur
+        })
+        
+    return etudiants_list, None
 
-        if not cleaned_col_map:
-            err_msg = ["Aucun en-tête de créneau Excel mappé. Vérifiez formats."]
-            if len(original_col_names) > 2: err_msg.append(f"Ex: '{original_col_names[2]}'")
-            if map_creneaux_app: err_msg.append(f"Attendu (ex): '{list(map_creneaux_app.keys())[0]}'")
-            return [], err_msg, []
 
-        for _, row in df_excel.iterrows(): 
-            nom_enseignant_fichier = str(row[col_ens_nom]).strip() 
-            if not nom_enseignant_fichier: continue
-
-            best_match_nom_app = None
-            highest_score = 0
-            nom_enseignant_fichier_lower = nom_enseignant_fichier.lower()
-
-            for nom_app in personnes_reconnues_app_set:
-                nom_app_lower = nom_app.lower()
-                score = fuzz.token_sort_ratio(nom_enseignant_fichier_lower, nom_app_lower)
-                if score > highest_score:
-                    highest_score = score
-                    best_match_nom_app = nom_app
-            
-            nom_enseignant_final_pour_app = None # Initialisation ici pour la portée
-            if highest_score >= score_matching_seuil:
-                nom_enseignant_final_pour_app = best_match_nom_app
-                if nom_enseignant_final_pour_app.lower() != nom_enseignant_fichier_lower or highest_score < 100 :
-                     messages_warning.append(
-                         f"Fichier: '{nom_enseignant_fichier}' rapproché avec App: '{nom_enseignant_final_pour_app}' (score: {highest_score}%)"
-                     )
-            else:
-                messages_warning.append(
-                    f"Fichier: '{nom_enseignant_fichier}' non rapproché (meilleur score: {highest_score}% vs '{best_match_nom_app if best_match_nom_app else 'aucun'}'). Ignoré."
-                )
-                continue
-            
-            # Si on arrive ici, nom_enseignant_final_pour_app EST défini.
-            personnes_traitees_import.add(nom_enseignant_final_pour_app) # Correction: Utiliser la variable correcte
-            if nom_enseignant_final_pour_app not in st.session_state.disponibilites: # Correction: Utiliser la variable correcte
-                st.session_state.disponibilites[nom_enseignant_final_pour_app] = {} # Correction: Utiliser la variable correcte
-            
-            for col_orig_excel, cle_app_match in cleaned_col_map.items():
-                if col_orig_excel in row: # S'assurer que la colonne existe dans la ligne actuelle
-                    val = row[col_orig_excel]
-                    try:
-                        if pd.isna(val): continue
-                        # Correction: Utiliser la variable correcte
-                        st.session_state.disponibilites[nom_enseignant_final_pour_app][cle_app_match] = bool(int(float(val)))
-                    except ValueError: 
-                        # Correction: Utiliser la variable correcte pour le nom de l'enseignant du fichier
-                        messages_erreur.append(f"Val:'{val}' invalide pour '{nom_enseignant_fichier}' à '{col_orig_excel}'.")
-
-        for p_nettoyage in personnes_traitees_import:
-            if p_nettoyage in st.session_state.disponibilites:
-                dispos_p = st.session_state.disponibilites[p_nettoyage]
-                st.session_state.disponibilites[p_nettoyage] = {k:v for k,v in dispos_p.items() if k in cles_dispo_valides_app_set}
-
-        if personnes_traitees_import: messages_succes.append(f"Dispos Excel importées pour {len(personnes_traitees_import)}.")
-        elif not messages_erreur: messages_warning.append("Aucune personne Excel traitée.")
-    except ImportError: messages_erreur.append("'openpyxl' requis. `pip install openpyxl`")
-    except Exception as e: messages_erreur.append(f"Erreur import Excel: {str(e)}")
-    return messages_succes, messages_erreur, messages_warning
-
+# --- Fonctions d'importation des disponibilités (MODIFIÉE POUR CSV) ---
 def importer_disponibilites_csv(uploaded_file, 
                                 horaires_par_jour_app_config: Dict[str, List[str]], 
                                 tous_tuteurs_app: List[str], 
                                 co_jurys_app: List[str],
                                 score_matching_seuil=75):
     messages_succes, messages_erreur, messages_warning = [], [], []
-    personnes_traitees_import, personnes_reconnues_app_set = set(), set(tous_tuteurs_app + co_jurys_app)
-    map_creneaux_app, cles_dispo_valides_app_set = {}, set()
-
-    # (Logique identique à la version Excel pour map_creneaux_app et cles_dispo_valides_app_set)
-    for jour_app_str, creneaux_list_app in horaires_par_jour_app_config.items():
-        try: date_part_app = jour_app_str.split(" ")[1]
-        except (IndexError, ValueError): continue
-        for creneau_app_str in creneaux_list_app: 
-            cles_dispo_valides_app_set.add(f"{jour_app_str} | {creneau_app_str}")
-            try:
-                h_debut, h_fin = [h.strip() for h in creneau_app_str.split(" - ")]
-                map_creneaux_app[f"{date_part_app} {h_debut} à {h_fin}"] = f"{jour_app_str} | {creneau_app_str}"
-            except ValueError: continue
+    personnes_traitees_import = set()
+    personnes_reconnues_app_set = set(tous_tuteurs_app + co_jurys_app)
     
     if not uploaded_file: return [], ["Aucun fichier CSV fourni."], []
-    try:
-        stringio = StringIO(uploaded_file.getvalue().decode("utf-8"))
-        df_csv = pd.read_csv(stringio, sep=';', header=0, skipinitialspace=True)
-        if df_csv.empty: return [], ["Fichier CSV vide."], []
-
-        col_ens_nom_csv = df_csv.columns[0]
-        original_col_names_csv = df_csv.columns.tolist()
-        cleaned_col_map_csv = {}
-
-        for col_raw_csv in original_col_names_csv[2:]:
-            col_clean_csv = str(col_raw_csv).replace(" à\xa0 ", " à ").replace("\xa0", " ").strip(" .")
-            parts_csv = col_clean_csv.split(" ")
-            if len(parts_csv) >= 4:
-                try:
-                    idx_a_csv = parts_csv.index("à")
-                    if idx_a_csv > 0 and idx_a_csv + 1 < len(parts_csv):
-                        cle_csv_match = f"{parts_csv[0]} {parts_csv[1]} à {parts_csv[idx_a_csv + 1]}"
-                        if cle_csv_match in map_creneaux_app:
-                            cleaned_col_map_csv[col_raw_csv] = map_creneaux_app[cle_csv_match]
-                except ValueError: pass
-        
-        if not cleaned_col_map_csv:
-            err_msg_csv = ["Aucun en-tête CSV mappé. Vérifiez formats."]
-            if len(original_col_names_csv) > 2: err_msg_csv.append(f"Ex CSV non mappé: '{original_col_names_csv[2]}'")
-            if map_creneaux_app: err_msg_csv.append(f"Attendu (ex): '{list(map_creneaux_app.keys())[0]}'")
-            return [], err_msg_csv, []
-
-        for _, row_csv in df_csv.iterrows():
-            nom_ens_csv_row = str(row_csv[col_ens_nom_csv]).strip()
-            if not nom_ens_csv_row: continue
-            best_match_csv, h_score_csv = None, 0
-            for nom_app_csv in personnes_reconnues_app_set:
-                score_csv = fuzz.ratio(nom_ens_csv_row.lower(), nom_app_csv.lower())
-                if score_csv > h_score_csv: h_score_csv, best_match_csv = score_csv, nom_app_csv
+    
+    content = uploaded_file.getvalue()
+    df_csv = None
+    encodings = ['utf-8', 'latin-1', 'cp1252']
+    for enc in encodings:
+        try:
+            stringio = StringIO(content.decode(enc))
+            df_csv = pd.read_csv(stringio, sep=';', header=0, skipinitialspace=True)
+            break
+        except UnicodeDecodeError:
+            continue
             
-            nom_ens_final_csv = None
-            if h_score_csv >= score_matching_seuil:
-                nom_ens_final_csv = best_match_csv
-                if nom_ens_final_csv != nom_ens_csv_row: messages_warning.append(f"CSV:'{nom_ens_csv_row}' -> App:'{nom_ens_final_csv}' ({h_score_csv}%)")
-            else:
-                messages_warning.append(f"CSV:'{nom_ens_csv_row}' non rapproché (max {h_score_csv}% vs '{best_match_csv}'). Ignoré.")
-                continue
+    if df_csv is None or df_csv.empty: 
+        return [], ["Fichier CSV vide ou encodage non supporté."], []
 
-            personnes_traitees_import.add(nom_ens_final_csv)
-            if nom_ens_final_csv not in st.session_state.disponibilites: st.session_state.disponibilites[nom_ens_final_csv] = {}
-
-            for col_orig_csv, cle_app_match_csv in cleaned_col_map_csv.items():
-                if col_orig_csv in row_csv: # S'assurer que la colonne existe dans la ligne (peut être manquant si CSV malformé)
-                    val_csv = row_csv[col_orig_csv]
-                    try:
-                        if pd.isna(val_csv): continue
-                        # Les valeurs CSV devraient être des int directement, mais float au cas où
-                        st.session_state.disponibilites[nom_ens_final_csv][cle_app_match_csv] = bool(int(float(val_csv))) 
-                    except ValueError: messages_erreur.append(f"Val CSV:'{val_csv}' invalide pour '{nom_ens_csv_row}' à '{col_orig_csv}'.")
+    csv_col_to_app_key = {}
+    
+    for col_name in df_csv.columns[3:]:
+        col_str = str(col_name).strip()
+        if not col_str or "Unnamed" in col_str: continue
         
-        for p_nettoyage_csv in personnes_traitees_import: # Pruning
-            if p_nettoyage_csv in st.session_state.disponibilites:
-                dispos_p_csv = st.session_state.disponibilites[p_nettoyage_csv]
-                st.session_state.disponibilites[p_nettoyage_csv] = {k:v for k,v in dispos_p_csv.items() if k in cles_dispo_valides_app_set}
+        match = re.search(r"(\d{2}/\d{2}/\d{4}).*?(\d{2}:\d{2})", col_str)
+        
+        if match:
+            date_csv = match.group(1)
+            heure_debut_csv = match.group(2)
+            
+            found_key = None
+            for jour_app, creneaux_app in horaires_par_jour_app_config.items():
+                if date_csv in jour_app:
+                    for creneau in creneaux_app:
+                        if creneau.startswith(heure_debut_csv):
+                            found_key = f"{jour_app} | {creneau}"
+                            break
+                if found_key: break
+            
+            if found_key:
+                csv_col_to_app_key[col_name] = found_key
 
-        if personnes_traitees_import: messages_succes.append(f"Dispos CSV importées pour {len(personnes_traitees_import)}.")
-        elif not messages_erreur: messages_warning.append("Aucune personne CSV traitée.")
+    if not csv_col_to_app_key:
+        return [], ["Aucune colonne de date reconnue. Vérifiez que les dates (ex: 26/01/2026) correspondent à celles définies à l'étape 5."], []
 
-    except UnicodeDecodeError: messages_erreur.append("Encodage CSV invalide. Utilisez UTF-8.")
-    except Exception as e_csv: messages_erreur.append(f"Erreur import CSV: {str(e_csv)}")
+    col_nom = df_csv.columns[0] 
+
+    for _, row in df.iterrows():
+        nom_csv_brut = str(row[col_nom]).strip()
+        if not nom_csv_brut or pd.isna(row[col_nom]): continue
+
+        best_match, h_score = None, 0
+        for nom_app in personnes_reconnues_app_set:
+            # Token Sort Ratio gère l'inversion Nom/Prénom (Emmanuel PERRIN vs PERRIN Emmanuel)
+            score = fuzz.token_sort_ratio(nom_csv_brut.lower(), nom_app.lower())
+            if score > h_score: h_score, best_match = score, nom_app
+        
+        nom_final = None
+        if h_score >= score_matching_seuil:
+            nom_final = best_match
+        else:
+            messages_warning.append(f"Ignoré: '{nom_csv_brut}' (max match: {h_score}% avec '{best_match}')")
+            continue
+
+        personnes_traitees_import.add(nom_final)
+        if nom_final not in st.session_state.disponibilites: 
+            st.session_state.disponibilites[nom_final] = {}
+
+        for col_csv, app_key in csv_col_to_app_key.items():
+            val = row[col_csv]
+            try:
+                if pd.isna(val): is_dispo = False
+                else: is_dispo = bool(int(float(val)))
+                st.session_state.disponibilites[nom_final][app_key] = is_dispo
+            except ValueError:
+                pass 
+
+    if personnes_traitees_import: 
+        messages_succes.append(f"Import CSV réussi pour {len(personnes_traitees_import)} jurys.")
+    else:
+        messages_erreur.append("Aucun jury importé.")
+
     return messages_succes, messages_erreur, messages_warning
+
+def importer_disponibilites_excel_simple_header(uploaded_file, horaires_par_jour, tuteurs, cojurys, score_matching_seuil=75):
+    return [], ["Utilisez le format CSV pour ce fichier spécifique."], []
 
 # --- Interface utilisateur ---
 
 st.sidebar.header("📥 Import Données de Base")
-excel_file_base = st.sidebar.file_uploader("Étudiants & Co-jurys (.xlsx)", type=["xlsx"], key="excel_base_uploader_key")
-if excel_file_base:
-    try:
-        excel_data_base = pd.read_excel(excel_file_base, sheet_name=None)
-        if "etudiants" in excel_data_base:
-            etu_df = excel_data_base["etudiants"]
-            req_cols = {"Nom", "Prénom", "Pays", "Tuteur"}
-            if req_cols.issubset(etu_df.columns):
-                st.session_state.etudiants = etu_df[list(req_cols)].to_dict(orient="records")
-                st.sidebar.success(f"{len(st.session_state.etudiants)} étudiants importés.")
-            else: st.sidebar.error("Feuille 'etudiants': colonnes requises manquantes.")
-        if "co_jurys" in excel_data_base:
-            cj_df = excel_data_base["co_jurys"]
-            if "Nom" in cj_df.columns:
-                st.session_state.co_jurys = cj_df["Nom"].dropna().astype(str).tolist()
-                st.sidebar.success(f"{len(st.session_state.co_jurys)} co-jurys importés.")
-            else: st.sidebar.error("Feuille 'co_jurys': colonne 'Nom' manquante.")
-    except Exception as e_imp_base: st.sidebar.error(f"Erreur Excel base: {e_imp_base}")
+source_option = st.sidebar.radio("Source Étudiants :", ("Excel (Ancien format)", "CSV (Format Ecole)"))
+
+if source_option == "Excel (Ancien format)":
+    excel_file_base = st.sidebar.file_uploader("Fichier Excel .xlsx", type=["xlsx"], key="excel_base_uploader_key")
+    if excel_file_base:
+        try:
+            excel_data_base = pd.read_excel(excel_file_base, sheet_name=None)
+            if "etudiants" in excel_data_base:
+                etu_df = excel_data_base["etudiants"]
+                req_cols = {"Nom", "Prénom", "Pays", "Tuteur"}
+                if req_cols.issubset(etu_df.columns):
+                    st.session_state.etudiants = etu_df[list(req_cols)].to_dict(orient="records")
+                    st.sidebar.success(f"{len(st.session_state.etudiants)} étudiants importés.")
+            if "co_jurys" in excel_data_base:
+                cj_df = excel_data_base["co_jurys"]
+                if "Nom" in cj_df.columns:
+                    st.session_state.co_jurys = cj_df["Nom"].dropna().astype(str).tolist()
+                    st.sidebar.success(f"{len(st.session_state.co_jurys)} co-jurys importés.")
+        except Exception as e_imp_base: st.sidebar.error(f"Erreur Excel base: {e_imp_base}")
+
+else: # Import CSV Ecole
+    csv_file_etu = st.sidebar.file_uploader("Fichier Étudiants .csv", type=["csv"], key="csv_etu_uploader_key")
+    if csv_file_etu:
+        etu_list, err = importer_etudiants_csv(csv_file_etu)
+        if err:
+            st.sidebar.error(err)
+        elif etu_list:
+            st.session_state.etudiants = etu_list
+            st.sidebar.success(f"{len(etu_list)} étudiants importés depuis le CSV.")
+            
+            # Extraction automatique des co-jurys potentiels si besoin (non présents dans ce CSV spécifique pour la soutenance)
+            # Mais on peut vider la liste pour éviter les confusions avec des imports précédents
+            # st.session_state.co_jurys = [] 
 
 
 if st.session_state.etape == "etudiants":
@@ -1064,7 +945,7 @@ elif st.session_state.etape == "co_jury":
         for idx, cj in enumerate(st.session_state.co_jurys):
             c1, c2 = st.columns([0.8, 0.2])
             c1.write(f"👨‍🏫 {cj}")
-            if c2.button("Suppr.", key=f"cj_del_{idx}_{cj[:5]}"): # Clé plus unique
+            if c2.button("Suppr.", key=f"cj_del_{idx}_{cj[:5]}"):
                 del st.session_state.co_jurys[idx]; st.rerun()
     if st.button("Suivant > Dates", type="primary", key="cojury_next_btn"):
         st.session_state.etape = "dates"; st.rerun()
@@ -1072,12 +953,25 @@ elif st.session_state.etape == "co_jury":
 elif st.session_state.etape == "dates":
     afficher_navigation()
     st.header(etapes_labels["dates"])
+    st.info("⚠️ Important : Les dates sélectionnées ici doivent correspondre aux dates présentes dans votre fichier CSV de disponibilités (ex: 26/01/2026).")
+    
     nb_jours_def = len(st.session_state.dates_soutenance) if st.session_state.dates_soutenance else 2
     nb_jours_sout_in = st.number_input("Nombre de jours de soutenances", 1, 10, nb_jours_def, key="nb_jours_in_key")
     dates_saisies_ui = []
+    
+    default_date = datetime(2026, 1, 26).date() 
+    
+    cols_dates = st.columns(min(nb_jours_sout_in, 4))
     for i in range(nb_jours_sout_in):
-        date_def = st.session_state.dates_soutenance[i] if i < len(st.session_state.dates_soutenance) else datetime.now().date() + timedelta(days=i)
-        dates_saisies_ui.append(st.date_input(f"Date Jour {i+1}", value=date_def, key=f"date_sout_in_{i}"))
+        if i < len(st.session_state.dates_soutenance):
+            val_d = st.session_state.dates_soutenance[i]
+        else:
+            val_d = default_date + timedelta(days=i if i < 2 else i+1) 
+        
+        with cols_dates[i % 4]:
+            d = st.date_input(f"Date Jour {i+1}", value=val_d, key=f"date_sout_in_{i}")
+            dates_saisies_ui.append(d)
+            
     if st.button("Valider > Créneaux", type="primary", key="dates_val_btn"):
         st.session_state.dates_soutenance = dates_saisies_ui
         st.session_state.etape = "disponibilites"; st.rerun()
@@ -1095,10 +989,9 @@ elif st.session_state.etape == "disponibilites":
             heure_str = creneau_unique['heure']
             if jour_str not in horaires_par_jour_etape6:
                 horaires_par_jour_etape6[jour_str] = []
-            if heure_str not in horaires_par_jour_etape6[jour_str]: # Éviter doublons d'heures par jour
+            if heure_str not in horaires_par_jour_etape6[jour_str]:
                 horaires_par_jour_etape6[jour_str].append(heure_str)
         
-        # Trier les créneaux par heure de début pour chaque jour
         for jour_key in horaires_par_jour_etape6:
             horaires_par_jour_etape6[jour_key].sort(key=lambda x: datetime.strptime(x.split(" - ")[0], "%H:%M"))
 
@@ -1110,7 +1003,7 @@ elif st.session_state.etape == "disponibilites":
                 cols_aff = st.columns(min(len(slots_aff), 5)) 
                 for i_s, slot_s in enumerate(slots_aff):
                     with cols_aff[i_s % 5]: st.info(f"🕒 {slot_s}")
-            else: st.write("Aucun créneau pour ce jour avec la durée/périodes spécifiées.")
+            else: st.write("Aucun créneau généré.")
         if st.button("Suivant > Saisie Disponibilités", type="primary", key="creneaux_next_btn"):
             st.session_state.etape = "disponibilites_selection"; st.rerun()
     else: st.warning("Définissez dates et durée avant de générer les créneaux.")
@@ -1119,118 +1012,60 @@ elif st.session_state.etape == "disponibilites_selection":
     afficher_navigation()
     st.header(etapes_labels["disponibilites_selection"])
 
-    st.subheader("⬇️ Importer les disponibilités")
-    import_type = st.radio("Type de fichier à importer:", ('Excel (.xlsx)', 'CSV (.csv)'), index=0, key="import_type_radio_key", horizontal=True)
-    
-    uploader_key_suffix = "_excel" if import_type == 'Excel (.xlsx)' else "_csv"
-    file_types_allowed = ["xlsx", "xls"] if import_type == 'Excel (.xlsx)' else ["csv"]
-    
-    if import_type == 'Excel (.xlsx)':
-        st.markdown("<small>Structure Excel: 1ère feuille, 1ère ligne en-tête (`ENSEIGNANT | FILIERE | JJ/MM/AAAA HH:MM à HH:MM | ...`), puis données.</small>", unsafe_allow_html=True)
-        importer_func_selected = importer_disponibilites_excel_simple_header
-    else: # CSV
-        st.markdown("<small>Structure CSV: délimiteur ';', UTF-8, 1ère ligne en-tête (`ENSEIGNANT;FILIERE;JJ/MM/AAAA HH:MM à HH:MM;...`), puis données.</small>", unsafe_allow_html=True)
-        importer_func_selected = importer_disponibilites_csv
+    st.subheader("⬇️ Importer les disponibilités (CSV)")
+    st.markdown("**Format attendu :** CSV avec séparateur point-virgule (;). Colonnes : `NOM`, `FILIERE`, `Nb`, `Date HeureStart - HeureEnd`, ...")
 
-    uploaded_file_dispo_ui_key = f"dispo_uploader{uploader_key_suffix}"
-    uploaded_file_dispo_ui_val = st.file_uploader(f"Choisir fichier {import_type}", type=file_types_allowed, key=uploaded_file_dispo_ui_key)
+    uploaded_file_dispo_ui_val = st.file_uploader("Choisir fichier CSV Disponibilités", type=["csv"], key="dispo_uploader_csv")
 
     if uploaded_file_dispo_ui_val is not None:
         horaires_ok = st.session_state.get("horaires_par_jour") and isinstance(st.session_state.horaires_par_jour, dict) and st.session_state.horaires_par_jour
         etudiants_ok = st.session_state.get("etudiants") and isinstance(st.session_state.etudiants, list) and st.session_state.etudiants
-        cojurys_ok = st.session_state.get("co_jurys") and isinstance(st.session_state.co_jurys, list) # Peut être vide
 
-        if horaires_ok and etudiants_ok: # Cojurys peuvent être vides
+        if horaires_ok and etudiants_ok:
             tuteurs_app_list_imp = list(set([e["Tuteur"] for e in st.session_state.etudiants if "Tuteur" in e]))
-            cojurys_app_list_imp = st.session_state.co_jurys if cojurys_ok else []
+            cojurys_app_list_imp = st.session_state.co_jurys if st.session_state.co_jurys else []
             
-            with st.spinner(f"Import {import_type}..."):
-                s_msg, e_msg, w_msg = importer_func_selected(
+            with st.spinner("Import CSV en cours..."):
+                s_msg, e_msg, w_msg = importer_disponibilites_csv(
                     uploaded_file_dispo_ui_val, st.session_state.horaires_par_jour, 
                     tuteurs_app_list_imp, cojurys_app_list_imp, score_matching_seuil=75
                 )
             for m in s_msg: st.success(m)
             for m in e_msg: st.error(m)
-            for m in w_msg: st.warning(m)
-            # Pour éviter le ré-upload automatique lors du prochain re-render, on met à None la variable qui tient le fichier
-            # Ceci nécessite que la clé de l'uploader soit stable.
-            # Cependant, Streamlit gère le FileUploader de manière à ce qu'il ne se recharge pas sans interaction.
-            # On va donc juste laisser l'UI se mettre à jour.
+            with st.expander("Voir les avertissements"):
+                for m in w_msg: st.warning(m)
         else: st.error("Prérequis manquants (étapes créneaux/étudiants).")
     
     st.divider()
-    st.subheader("✏️ Saisie manuelle / Vérification")
+    st.subheader("✏️ Vérification / Modification")
     
     tous_tuteurs_disp_ui = list(set([e["Tuteur"] for e in st.session_state.etudiants if "Tuteur" in e])) if st.session_state.etudiants else []
     co_jurys_disp_ui = st.session_state.co_jurys if st.session_state.co_jurys else []
     personnes_disp_ui = sorted(list(set(tous_tuteurs_disp_ui + co_jurys_disp_ui)))
 
-    if not personnes_disp_ui or not st.session_state.horaires_par_jour:
-        st.info("Aucun jury ou créneau défini pour la saisie des disponibilités.")
+    if not personnes_disp_ui:
+        st.info("Aucun jury défini.")
     else:
-        for p_disp_init in personnes_disp_ui: # Init dispo dict si besoin
+        for p_disp_init in personnes_disp_ui:
             if p_disp_init not in st.session_state.disponibilites: st.session_state.disponibilites[p_disp_init] = {}
 
         for personne_disp_loop in personnes_disp_ui:
-            st.markdown(f"#### 👨‍🏫 Dispos de {personne_disp_loop}")
-            dispos_p_actuelle = st.session_state.disponibilites.get(personne_disp_loop, {})
-            for jour_disp_loop, creneaux_list_jour_disp in st.session_state.horaires_par_jour.items():
-                if not creneaux_list_jour_disp: continue 
-                st.markdown(f"**{jour_disp_loop}**")
-                
-                toutes_coches_jour_actuel = all(dispos_p_actuelle.get(f"{jour_disp_loop} | {c_d_l}", False) for c_d_l in creneaux_list_jour_disp) if creneaux_list_jour_disp else False
-                
-                jour_key_cleaned = "".join(filter(str.isalnum, jour_disp_loop))
-                all_sel_key_ui = f"all_sel_{personne_disp_loop}_{jour_key_cleaned}"
-                
-                # Checkbox "Toute la journée"
-                # Sa valeur est True si toutes les sous-checkboxes sont True DANS LE STATE
-                # L'interaction utilisateur est capturée par `all_selected_interaction_val`
-                all_selected_interaction_val = st.checkbox("Toute la journée", value=toutes_coches_jour_actuel, key=all_sel_key_ui)
-
-                # Si l'utilisateur VIENT DE COCHER "Toute la journée"
-                if all_selected_interaction_val and not toutes_coches_jour_actuel:
-                    for c_d_l_force in creneaux_list_jour_disp:
-                        st.session_state.disponibilites[personne_disp_loop][f"{jour_disp_loop} | {c_d_l_force}"] = True
-                    # Forcer un re-render pour que les cases individuelles reflètent le changement
-                    st.rerun() 
-                
-                # Si l'utilisateur VIENT DE DECOCHER "Toute la journée"
-                if not all_selected_interaction_val and toutes_coches_jour_actuel:
-                    for c_d_l_force in creneaux_list_jour_disp:
-                         st.session_state.disponibilites[personne_disp_loop][f"{jour_disp_loop} | {c_d_l_force}"] = False
-                    st.rerun()
-
-
-                cols_disp_cb = st.columns(min(len(creneaux_list_jour_disp), 4))
-                for i_disp_cb, creneau_val_disp_cb in enumerate(creneaux_list_jour_disp):
-                    with cols_disp_cb[i_disp_cb % 4]:
-                        key_dispo_individual_cb = f"{jour_disp_loop} | {creneau_val_disp_cb}"
-                        # Lire la valeur actuelle du state pour cette checkbox
-                        valeur_actuelle_cb_state = st.session_state.disponibilites[personne_disp_loop].get(key_dispo_individual_cb, False)
-                        
-                        creneau_key_cleaned_cb = "".join(filter(str.isalnum, creneau_val_disp_cb))
-                        individual_cb_ui_key = f"cb_{personne_disp_loop}_{jour_key_cleaned}_{i_disp_cb}_{creneau_key_cleaned_cb}"
-                        
-                        # La checkbox individuelle est désactivée si "Toute la journée" est effectivement cochée
-                        is_disabled_ind_cb = all_selected_interaction_val 
-
-                        checked_individual_val = st.checkbox(
-                            creneau_val_disp_cb,
-                            value=valeur_actuelle_cb_state, # Afficher la valeur du state
-                            key=individual_cb_ui_key,
-                            disabled=is_disabled_ind_cb 
-                        )
-                        
-                        # Mettre à jour le state SEULEMENT si cette checkbox a été modifiée par l'utilisateur
-                        # ET que "Toute la journée" n'est pas active (pour éviter conflit d'update)
-                        if not is_disabled_ind_cb: # Si elle n'est pas désactivée
-                            if checked_individual_val != valeur_actuelle_cb_state: # Et que sa valeur a changé
-                                 st.session_state.disponibilites[personne_disp_loop][key_dispo_individual_cb] = checked_individual_val
-                                 # Si ce changement affecte l'état de "Toute la journée", il faut un rerun pour la mettre à jour
-                                 st.rerun()
-                st.markdown("---")
-            st.divider() 
+            with st.expander(f"👨‍🏫 {personne_disp_loop}", expanded=False):
+                dispos_p_actuelle = st.session_state.disponibilites.get(personne_disp_loop, {})
+                for jour_disp_loop, creneaux_list_jour_disp in st.session_state.horaires_par_jour.items():
+                    if not creneaux_list_jour_disp: continue 
+                    st.write(f"**{jour_disp_loop}**")
+                    
+                    cols_disp_cb = st.columns(min(len(creneaux_list_jour_disp), 4))
+                    for i_disp_cb, creneau_val_disp_cb in enumerate(creneaux_list_jour_disp):
+                        with cols_disp_cb[i_disp_cb % 4]:
+                            key_dispo_individual_cb = f"{jour_disp_loop} | {creneau_val_disp_cb}"
+                            valeur_actuelle_cb_state = st.session_state.disponibilites[personne_disp_loop].get(key_dispo_individual_cb, False)
+                            
+                            if st.checkbox(creneau_val_disp_cb.split(" - ")[0], value=valeur_actuelle_cb_state, key=f"cb_{personne_disp_loop}_{i_disp_cb}_{jour_disp_loop}"):
+                                st.session_state.disponibilites[personne_disp_loop][key_dispo_individual_cb] = True
+                            else:
+                                st.session_state.disponibilites[personne_disp_loop][key_dispo_individual_cb] = False
 
     if st.button("Suivant > Générer Planning", type="primary", key="dispo_sel_next_btn"):
         st.session_state.etape = "generation"; st.rerun()
@@ -1239,33 +1074,24 @@ elif st.session_state.etape == "generation":
     afficher_navigation()
     st.header(etapes_labels["generation"])
     
-    # Checkbox pour AG, cochée par défaut
-    ag_params_key_suffix = "_gen_etape" # Pour rendre les clés des sliders uniques
     utiliser_ag_ui = st.checkbox(
         "Utiliser l'algorithme génétique (recommandé)", value=True, 
-        help="L'AG est plus performant. Sera aussi utilisé si l'algo classique < 85% de réussite.",
-        key=f"utiliser_ag_checkbox{ag_params_key_suffix}"
+        key="utiliser_ag_checkbox"
     )
     params_ag_config_from_ui = {}
     if utiliser_ag_ui:
-        with st.expander("⚙️ Paramètres de l'algorithme génétique", expanded=st.session_state.get(f"ag_expander_open{ag_params_key_suffix}", False) ):
-            st.session_state[f"ag_expander_open{ag_params_key_suffix}"] = True # Garder ouvert si cliqué
-            taille_pop_val = st.slider("Taille population AG", 20, 250, 80, key=f"ag_pop{ag_params_key_suffix}")
-            nb_gen_val = st.slider("Nb générations AG", 20, 1000, 300, key=f"ag_gen{ag_params_key_suffix}")
-            taux_mut_val = st.slider("Taux mutation AG", 0.05, 0.50, 0.15, step=0.01, key=f"ag_mut{ag_params_key_suffix}")
-            taux_crois_val = st.slider("Taux croisement AG", 0.50, 0.95, 0.85, step=0.01, key=f"ag_crois{ag_params_key_suffix}")
+        with st.expander("⚙️ Paramètres de l'algorithme génétique"):
+            taille_pop_val = st.slider("Taille population AG", 20, 250, 80)
+            nb_gen_val = st.slider("Nb générations AG", 20, 1000, 300)
             params_ag_config_from_ui = {
-                'taille_population': taille_pop_val, 'nb_generations': nb_gen_val, 
-                'taux_mutation': taux_mut_val, 'taux_croisement': taux_crois_val
+                'taille_population': taille_pop_val, 'nb_generations': nb_gen_val
             }
         
     if st.button("🚀 Lancer l'optimisation", type="primary", key="lancer_opti_final_btn"):
-        # Vérifications de base
         if not st.session_state.etudiants: st.error("Aucun étudiant à planifier."); st.stop()
         if not st.session_state.dates_soutenance: st.error("Aucune date de soutenance définie."); st.stop()
-        if not st.session_state.horaires_par_jour: st.error("Créneaux non générés (Étape 6)."); st.stop()
 
-        with st.spinner("Optimisation en cours... Cela peut prendre du temps..."):
+        with st.spinner("Optimisation en cours..."):
             optimiseur = PlanificationOptimiseeV2(
                 st.session_state.etudiants, st.session_state.co_jurys, st.session_state.dates_soutenance,
                 st.session_state.disponibilites, st.session_state.nb_salles, st.session_state.duree_soutenance
@@ -1275,81 +1101,27 @@ elif st.session_state.etape == "generation":
             )
             st.session_state.planning_final = planning_final_opti
 
-        if stats_ag_opti: # Si l'AG a tourné
-            st.subheader("🧬 Statistiques de l'Algorithme Génétique")
-            # ... (affichage des stats AG comme avant)
-            c1,c2,c3 = st.columns(3)
-            c1.metric("Générations", stats_ag_opti.get('generations', 'N/A'))
-            c2.metric("Fitness Finale", f"{stats_ag_opti.get('fitness_finale', 0.0):.1f}")
-            c3.metric("Conflits (AG)", stats_ag_opti.get('conflits', 'N/A'))
-            if 'amelioration_valeur' in stats_ag_opti and stats_ag_opti['amelioration_valeur'] > 0:
-                st.success(f"AG a ajouté {stats_ag_opti['amelioration_valeur']} soutenances.")
-            
-            hist_data = stats_ag_opti.get('historique')
-            if hist_data:
-                import plotly.graph_objects as go
-                df_hist = pd.DataFrame(hist_data)
-                if not df_hist.empty and 'generation' in df_hist.columns:
-                    fig_evol = go.Figure()
-                    if 'fitness_max' in df_hist.columns: fig_evol.add_trace(go.Scatter(x=df_hist['generation'], y=df_hist['fitness_max'], mode='lines', name='Fitness Max'))
-                    if 'soutenances_max' in df_hist.columns: fig_evol.add_trace(go.Scatter(x=df_hist['generation'], y=df_hist['soutenances_max'], mode='lines', name='Soutenances Max', yaxis='y2'))
-                    fig_evol.update_layout(title="Évolution AG", xaxis_title="Génération", yaxis_title="Fitness", yaxis2=dict(title="Soutenances", overlaying='y', side='right'), height=350)
-                    st.plotly_chart(fig_evol, use_container_width=True)
-
+        if stats_ag_opti:
+            st.success(f"Fitness Finale: {stats_ag_opti.get('fitness_finale', 0.0):.0f}")
 
         if st.session_state.planning_final:
-            conflits_planning = optimiseur.verifier_conflits(st.session_state.planning_final)
-            if conflits_planning:
-                st.error("⚠️ Conflits détectés dans le planning final :"); [st.write(f"- {c}") for c in conflits_planning]
-            else: st.success("✅ Aucun conflit de base (salle/jury simultané) détecté.")
-
             st.success(f"Planning généré! {len(st.session_state.planning_final)} soutenances planifiées.")
             if non_planifies_opti > 0: st.warning(f"⚠️ {non_planifies_opti} étudiant(s) non planifiés.")
 
             df_planning_final_ui = pd.DataFrame(st.session_state.planning_final)
             st.subheader("📋 Planning détaillé")
-            st.dataframe(df_planning_final_ui.drop(['Début', 'Fin'], axis=1, errors='ignore'), use_container_width=True, hide_index=True)
+            st.dataframe(df_planning_final_ui, use_container_width=True, hide_index=True)
 
-            if not df_planning_final_ui.empty:
-                st.subheader("📊 Visualisation Gantt")
-                # ... (Gantt comme avant)
-                df_planning_final_ui["Task"] = df_planning_final_ui["Étudiant"] + " (" + df_planning_final_ui["Salle"] + ")"
-                fig_gantt_ui = px.timeline(
-                    df_planning_final_ui, x_start="Début", x_end="Fin", y="Tuteur", color="Task",
-                    title="Planning par tuteur", hover_data=["Étudiant", "Co-jury", "Salle", "Pays"]
-                )
-                fig_gantt_ui.update_yaxes(autorange="reversed"); fig_gantt_ui.update_layout(height=max(500, len(df_planning_final_ui['Tuteur'].unique())*40 + 100 ))
-                st.plotly_chart(fig_gantt_ui, use_container_width=True)
-                
-                st.subheader("📥 Exportation")
-                # ... (Export comme avant)
-                csv_export_ui = df_planning_final_ui.to_csv(index=False).encode('utf-8')
-                st.download_button("Télécharger CSV", csv_export_ui, "planning_soutenances.csv", "text/csv", key="dl_csv_btn")
-                
-                output_excel_ui = BytesIO()
-                with pd.ExcelWriter(output_excel_ui, engine='openpyxl') as writer_excel_ui:
-                    df_planning_final_ui.to_excel(writer_excel_ui, index=False, sheet_name='Planning')
-                st.download_button("Télécharger Excel", output_excel_ui.getvalue(), "planning_soutenances.xlsx", 
-                                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_excel_btn")
+            csv_export_ui = df_planning_final_ui.to_csv(index=False, sep=';').encode('utf-8')
+            st.download_button("Télécharger CSV", csv_export_ui, "planning_soutenances.csv", "text/csv")
         else:
-            st.error("❌ Aucune soutenance n'a pu être planifiée. Vérifiez les contraintes et disponibilités.")
-
+            st.error("❌ Aucune soutenance n'a pu être planifiée.")
 
 # Sidebar Résumé
 with st.sidebar:
     st.markdown("---")
     st.markdown("### 📊 Résumé Actuel")
-    # ... (Résumé comme avant)
     st.write(f"**Étudiants :** {len(st.session_state.etudiants)}")
     st.write(f"**Co-jurys :** {len(st.session_state.co_jurys)}")
-    st.write(f"**Salles :** {st.session_state.nb_salles}")
-    st.write(f"**Durée :** {st.session_state.duree_soutenance} min")
     if st.session_state.dates_soutenance:
         st.write(f"**Dates :** {len(st.session_state.dates_soutenance)} jour(s)")
-    st.markdown("---")
-    st.markdown("""
-    ### ℹ️ À propos
-    Planification de soutenances.
-    ---
-    © 2024-2025 - Polytech 4A MAM
-    """)
