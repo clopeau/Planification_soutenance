@@ -368,70 +368,70 @@ class PlanificationOptimiseeV2:
 def importer_etudiants_csv(uploaded_file):
     etudiants_list = []
     uploaded_file.seek(0)
-    
-    # 1. Tentative de lecture flexible
     try:
-        # 'python' engine est plus robuste pour les séparateurs
         df = pd.read_csv(uploaded_file, sep=';', encoding='utf-8', engine='python', on_bad_lines='skip')
     except UnicodeDecodeError:
         uploaded_file.seek(0)
         df = pd.read_csv(uploaded_file, sep=';', encoding='latin-1', engine='python', on_bad_lines='skip')
-    except Exception as e:
-        return [], f"Erreur technique lecture CSV: {str(e)}"
+    except Exception as e: return [], f"Erreur technique lecture CSV: {str(e)}"
 
-    # 2. Nettoyage des noms de colonnes (espaces, majuscules)
     df.columns = [str(c).strip() for c in df.columns]
-    
-    # 3. Recherche intelligente des colonnes (insensible à la casse)
     col_map = {}
     columns_upper = {c.upper(): c for c in df.columns}
 
-    # Recherche Prénom
     for c_up, c_real in columns_upper.items():
         if "PRENOM" in c_up: col_map['Prénom'] = c_real; break
-    
-    # Recherche Nom (doit contenir NOM mais PAS Prénom)
     for c_up, c_real in columns_upper.items():
         if "NOM" in c_up and "PRENOM" not in c_up and "ENSEIGNANT" not in c_up: col_map['Nom'] = c_real; break
-    
-    # Recherche Pays (Pays ou Service d'accueil - Pays)
     for c_up, c_real in columns_upper.items():
-        if "PAYS" in c_up and "SERVICE" in c_up: # Priorité Service accueil
-            col_map['Pays'] = c_real; break
-    if 'Pays' not in col_map: # Fallback
+        if "PAYS" in c_up and "SERVICE" in c_up: col_map['Pays'] = c_real; break
+    if 'Pays' not in col_map: 
         for c_up, c_real in columns_upper.items():
             if c_up == "PAYS": col_map['Pays'] = c_real; break
-
-    # Recherche Tuteur (Enseignant référent)
     for c_up, c_real in columns_upper.items():
         if "ENSEIGNANT" in c_up or "TUTEUR" in c_up: col_map['Tuteur'] = c_real; break
 
-    # Vérification
     required = ['Prénom', 'Nom', 'Pays', 'Tuteur']
     missing = [r for r in required if r not in col_map]
-    
-    if missing:
-        return [], f"Colonnes introuvables malgré analyse : {missing}. Colonnes lues : {list(df.columns)}"
+    if missing: return [], f"Colonnes introuvables : {missing}"
 
-    # 4. Extraction des données
     for _, row in df.iterrows():
         prenom = str(row.get(col_map['Prénom'], '')).strip()
         nom = str(row.get(col_map['Nom'], '')).strip()
         if prenom and nom and prenom.lower() != 'nan':
             etudiants_list.append({
-                "Prénom": prenom,
-                "Nom": nom,
+                "Prénom": prenom, "Nom": nom,
                 "Pays": str(row.get(col_map['Pays'], '')).strip(),
                 "Tuteur": str(row.get(col_map['Tuteur'], '')).strip()
             })
-            
     return etudiants_list, None
 
 def importer_disponibilites_csv(uploaded_file, horaires_config, tuteurs, cojurys):
     msgs_s, msgs_e, msgs_w = [], [], []
-    try: content = uploaded_file.getvalue(); df_csv = pd.read_csv(StringIO(content.decode('utf-8')), sep=';')
-    except: df_csv = pd.read_csv(StringIO(content.decode('latin-1')), sep=';')
+    df_csv = None
     
+    # Détection automatique du séparateur
+    encodings = ['utf-8', 'latin-1', 'cp1252']
+    separators = [';', ',']
+    content_bytes = uploaded_file.getvalue()
+    
+    for enc in encodings:
+        if df_csv is not None: break
+        try:
+            decoded = content_bytes.decode(enc)
+            for sep in separators:
+                # Vérification rapide si le séparateur semble être le bon
+                if decoded.count(sep) > decoded.count('\n') * 2:
+                    try:
+                        temp_df = pd.read_csv(StringIO(decoded), sep=sep)
+                        if len(temp_df.columns) > 3: # Doit avoir des colonnes de dates
+                            df_csv = temp_df
+                            break
+                    except: pass
+        except: pass
+
+    if df_csv is None: return [], ["Impossible de lire le fichier (Format/Encodage inconnu ou séparateur invalide)."], []
+
     csv_map = {}; recognized = set(tuteurs + cojurys); treated = set()
     
     for col in df_csv.columns[3:]:
@@ -443,7 +443,7 @@ def importer_disponibilites_csv(uploaded_file, horaires_config, tuteurs, cojurys
                     for c in c_list:
                         if c.startswith(h_csv): csv_map[col] = f"{j_app} | {c}"; break
     
-    if not csv_map: return [], ["Aucune date correspondante trouvée. Vérifiez que les dates de l'étape 5 correspondent EXACTEMENT aux dates du CSV (Année 2026 ?)."], []
+    if not csv_map: return [], ["Aucune date reconnue. Vérifiez Année (2026?) et format."], []
 
     for _, row in df_csv.iterrows():
         nom_brut = str(row[df_csv.columns[0]]).strip()
