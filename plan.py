@@ -8,9 +8,10 @@ from io import BytesIO, StringIO
 from thefuzz import fuzz
 import re
 import random
+import unicodedata
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Planification Soutenances v4 (Contiguïté)", layout="wide", page_icon="🎓")
+st.set_page_config(page_title="Planification Soutenances v5", layout="wide", page_icon="🎓")
 
 # --- STYLES CSS ---
 st.markdown("""
@@ -46,6 +47,14 @@ def clean_str(val):
         return ""
     return str(val).strip()
 
+def normalize_text(text):
+    """Supprime les accents et met en majuscules de façon universelle."""
+    if not isinstance(text, str): return str(text)
+    text = text.upper()
+    # Décompose les caractères accentués (ex: 'é' devient 'e' + accent) et garde seulement la lettre
+    text = unicodedata.normalize('NFD', text).encode('ascii', 'ignore').decode("utf-8")
+    return text
+
 def lire_csv_robuste(uploaded_file):
     """Tente de lire le CSV avec différents séparateurs et encodages."""
     uploaded_file.seek(0)
@@ -57,45 +66,84 @@ def lire_csv_robuste(uploaded_file):
         try:
             decoded = content.decode(enc)
             for sep in separators:
+                # On vérifie s'il y a assez de séparateurs dans la première ligne
                 if decoded.count(sep) > decoded.count('\n'):
-                    return pd.read_csv(StringIO(decoded), sep=sep), None
+                    return pd.read_csv(StringIO(decoded), sep=sep, engine='python'), None
         except: continue
     
-    return None, "Format de fichier non reconnu (essayez UTF-8 ou Latin-1, séparateur ; ou ,)"
+    return None, "Format de fichier non reconnu. Vérifiez qu'il s'agit d'un CSV (séparateur ; ou ,)."
 
 def importer_etudiants(uploaded_file):
     df, error = lire_csv_robuste(uploaded_file)
     if error: return [], error
     
+    # Nettoyage des noms de colonnes
     raw_cols = list(df.columns)
-    cols_normalized = {c: c.upper().replace('É','E').replace('È','E').replace('Ê','E') for c in raw_cols}
-    col_map = {}
+    # On crée un dictionnaire {NomNormalisé : NomRéel}
+    cols_map_normalized = {normalize_text(c): c for c in raw_cols}
     
-    for c_up, c_real in cols_normalized.items():
-        if "PRENOM" in c_up and "NOM" not in c_up: col_map['prenom'] = c_real; break
-    for c_up, c_real in cols_normalized.items():
-        if "NOM" in c_up and "PRENOM" not in c_up and "REFERENT" not in c_up and "ENSEIGNANT" not in c_up: col_map['nom'] = c_real; break
-    for c_up, c_real in cols_normalized.items():
-        if "REFERENT" in c_up or "ENSEIGNANT" in c_up or "TUTEUR" in c_up: col_map['tuteur'] = c_real; break
-    for c_up, c_real in cols_normalized.items():
-        if "SERVICE" in c_up and "PAYS" in c_up: col_map['pays'] = c_real; break
-    if 'pays' not in col_map:
-        for c_up, c_real in cols_normalized.items():
-            if "PAYS" in c_up: col_map['pays'] = c_real; break
+    mapping = {}
+    
+    # 1. Recherche NOM (Etudiant)
+    # On cherche "NOM" tout court, ou contenant NOM mais sans "ACCUEIL" (pour éviter 'Service d'accueil - Nom')
+    # et sans "REFERENT" (pour éviter 'Enseignant référent')
+    for c_norm, c_real in cols_map_normalized.items():
+        if c_norm == "NOM": # Correspondance exacte prioritaire
+            mapping['nom'] = c_real
+            break
+    if 'nom' not in mapping:
+        for c_norm, c_real in cols_map_normalized.items():
+            if "NOM" in c_norm and "PRENOM" not in c_norm and "REFERENT" not in c_norm and "ACCUEIL" not in c_norm and "ENSEIGNANT" not in c_norm:
+                mapping['nom'] = c_real
+                break
 
-    required = ['nom', 'tuteur']
-    missing = [r for r in required if r not in col_map]
-    if missing: return [], f"Colonnes introuvables : {missing}. Colonnes lues : {raw_cols}"
+    # 2. Recherche PRENOM
+    for c_norm, c_real in cols_map_normalized.items():
+        if "PRENOM" in c_norm and "NOM" not in c_norm: # Juste PRENOM
+            mapping['prenom'] = c_real
+            break
+    if 'prenom' not in mapping: # Si colonnes "PRENOM NOM" ou autre
+         for c_norm, c_real in cols_map_normalized.items():
+            if "PRENOM" in c_norm:
+                mapping['prenom'] = c_real
+                break
+
+    # 3. Recherche TUTEUR (Enseignant Référent)
+    # Doit contenir REFERENT ou ENSEIGNANT, mais PAS "ENTREPRISE"
+    for c_norm, c_real in cols_map_normalized.items():
+        if ("REFERENT" in c_norm or "ENSEIGNANT" in c_norm or "TUTEUR" in c_norm) and "ENTREPRISE" not in c_norm:
+            mapping['tuteur'] = c_real
+            break
+            
+    # 4. Recherche PAYS
+    for c_norm, c_real in cols_map_normalized.items():
+        if "PAYS" in c_norm and "ACCUEIL" in c_norm: # Priorité "Service d'accueil - Pays"
+            mapping['pays'] = c_real
+            break
+    if 'pays' not in mapping:
+        for c_norm, c_real in cols_map_normalized.items():
+            if "PAYS" in c_norm: mapping['pays'] = c_real; break
+
+    # Vérification des colonnes obligatoires
+    missing = [k for k in ['nom', 'tuteur'] if k not in mapping]
+    if missing:
+        return [], f"Colonnes introuvables : {missing}. <br>Colonnes lues : {raw_cols}"
 
     etudiants = []
     for _, row in df.iterrows():
-        nom = clean_str(row.get(col_map.get('nom')))
-        prenom = clean_str(row.get(col_map.get('prenom'), ''))
-        tuteur = clean_str(row.get(col_map.get('tuteur')))
-        pays = clean_str(row.get(col_map.get('pays'), ''))
+        nom = clean_str(row.get(mapping.get('nom')))
+        prenom = clean_str(row.get(mapping.get('prenom'), ''))
+        tuteur = clean_str(row.get(mapping.get('tuteur')))
+        pays = clean_str(row.get(mapping.get('pays'), ''))
         
+        # On ignore les lignes où il manque le nom ou le tuteur
         if nom and tuteur:
-            etudiants.append({"Prénom": prenom, "Nom": nom, "Pays": pays, "Tuteur": tuteur})
+            etudiants.append({
+                "Prénom": prenom,
+                "Nom": nom,
+                "Pays": pays,
+                "Tuteur": tuteur
+            })
             
     return etudiants, None
 
@@ -103,11 +151,13 @@ def importer_disponibilites(uploaded_file, tuteurs_connus, co_jurys_connus, hora
     df, error = lire_csv_robuste(uploaded_file)
     if error: return [], [], [error]
     
+    # Liste de référence propre
     personnes_reconnues = {p for p in (tuteurs_connus + co_jurys_connus) if p and str(p).lower() != 'nan'}
     if not personnes_reconnues: return {}, [], ["Aucun tuteur valide n'a été trouvé à l'étape 1."]
 
     date_cols_map = {} 
     for col in df.columns:
+        # Regex pour date JJ/MM/AAAA
         match = re.search(r"(\d{2}/\d{2}/\d{4}).*?(\d{2}:\d{2})", str(col))
         if match:
             d_csv, h_csv = match.group(1), match.group(2)
@@ -130,6 +180,7 @@ def importer_disponibilites(uploaded_file, tuteurs_connus, co_jurys_connus, hora
         if not nom_brut: continue
         best_match, best_score = None, 0
         for p in personnes_reconnues:
+            # Token Sort Ratio gère "NOM Prénom" vs "Prénom NOM"
             score = fuzz.token_sort_ratio(nom_brut.lower(), p.lower())
             if score > best_score: best_score, best_match = score, p
         
@@ -160,14 +211,10 @@ class SchedulerEngine:
         self.co_jurys_pool = list(set(co_jurys_pool))
         self.slots = self._generate_slots()
         
-        # Statistiques de charge
         self.charge_tuteur = defaultdict(int)
         self.charge_cojury = defaultdict(int)
         
-        # Suivi précis pour la contiguïté (Qui est occupé quand ?)
-        # Format: self.jury_occupied_times[NomJury] = set(datetime_debut)
         self.jury_occupied_times = defaultdict(set)
-        # Format: self.jury_occupied_days[NomJury] = set(jour_str)
         self.jury_occupied_days = defaultdict(set)
         
         self.tuteurs_actifs = list(set(e['Tuteur'] for e in etudiants if e['Tuteur']))
@@ -204,68 +251,48 @@ class SchedulerEngine:
     def solve(self):
         planning = []
         unassigned = []
-        occupied_slots = set() # Par ID de créneau (salle/heure)
-        busy_jurys_at_slot = defaultdict(set) # Par clé temps (jour/heure)
+        occupied_slots = set() # Par ID de créneau
+        busy_jurys_at_slot = defaultdict(set) # Par clé temps
         
-        # 1. TRI DES ÉTUDIANTS (Les plus contraints en premier)
+        # 1. TRI DES ÉTUDIANTS
         student_queue = []
         for etu in self.etudiants:
             tut = etu['Tuteur']
-            # Nb de créneaux dispos pour ce tuteur
             nb = sum(1 for v in self.dispos.get(tut, {}).values() if v)
-            # On ajoute un petit random pour casser les égalités parfaites
             student_queue.append((nb, random.random(), etu))
         
-        # Tri croissant (moins de dispos = prioritaire)
-        student_queue.sort(key=lambda x: x[0])
+        student_queue.sort(key=lambda x: x[0]) # Les plus contraints en premier
         
         # 2. PLACEMENT
         for _, _, etu in student_queue:
             tuteur = etu['Tuteur']
             placed = False
-            
-            # --- ALGORITHME DE CONTIGUÏTÉ ---
-            # On va trier les slots disponibles pour ce tuteur
-            # Critères de tri :
-            # 1. Adjacence immédiate (Tuteur déjà là juste avant ou juste après) -> +100 pts
-            # 2. Même jour (Tuteur déjà là ce jour là) -> +10 pts
-            # 3. Ordre chronologique (pour remplir le matin d'abord par défaut) -> -timestamp
-            
             candidate_slots = []
             
             for slot in self.slots:
-                # Filtres durs
                 if slot['id'] in occupied_slots: continue
                 if tuteur in busy_jurys_at_slot[slot['key']]: continue
                 if not self.is_available(tuteur, slot['key']): continue
                 
-                # Calcul du score de contiguïté pour le TUTEUR
+                # Score TUTEUR
                 score = 0
                 t_start = slot['start']
                 t_prev = t_start - timedelta(minutes=self.duree)
-                t_next = slot['end'] # Car end = start + duree
+                t_next = slot['end']
                 
-                # Est-il occupé juste avant ?
                 if t_prev in self.jury_occupied_times[tuteur]: score += 100
-                # Est-il occupé juste après ?
                 if t_next in self.jury_occupied_times[tuteur]: score += 100
-                # Est-il occupé ce jour-là ?
                 if slot['jour'] in self.jury_occupied_days[tuteur]: score += 10
                 
-                # Ajout à la liste des candidats
                 candidate_slots.append((score, slot))
             
-            # Tri des slots : Score décroissant (le plus haut en premier), puis chronologique
-            # random.random() permet de varier les salles si égalité parfaite
+            # Tri des slots : Score décroissant, puis chronologique
             candidate_slots.sort(key=lambda x: (x[0], x[1]['start'].timestamp(), random.random()), reverse=True)
             
-            # Essayer de placer dans le meilleur slot
             for score_slot, slot in candidate_slots:
                 
-                # Trouver un CO-JURY
-                # On applique aussi la logique de contiguïté pour le co-jury !
+                # Trouver CO-JURY
                 cj_candidates = []
-                
                 for cj in self.all_possible_jurys:
                     if cj == tuteur: continue
                     if cj in busy_jurys_at_slot[slot['key']]: continue
@@ -281,20 +308,15 @@ class SchedulerEngine:
                     if t_next in self.jury_occupied_times[cj]: cj_score += 100
                     if slot['jour'] in self.jury_occupied_days[cj]: cj_score += 10
                     
-                    # On veut :
-                    # 1. Maximiser la contiguïté (cj_score haut)
-                    # 2. Minimiser la charge de travail (charge_cojury bas)
                     cj_candidates.append((cj_score, self.charge_cojury[cj], cj))
                 
                 if not cj_candidates: continue
                 
-                # Tri des co-jurys : Score DESC, Charge ASC
-                # Astuce python : on trie par (-score, charge) pour avoir score max et charge min
+                # Tri Co-jury : Meilleur score de contiguïté, puis charge minimale
                 cj_candidates.sort(key=lambda x: (-x[0], x[1]))
-                
                 best_cj = cj_candidates[0][2]
                 
-                # --- VALIDATION DU PLACEMENT ---
+                # Placement
                 planning.append({
                     "Étudiant": f"{etu['Prénom']} {etu['Nom']}",
                     "Tuteur": tuteur, "Co-jury": best_cj,
@@ -302,23 +324,19 @@ class SchedulerEngine:
                     "Salle": slot['salle'], "Début": slot['start'], "Fin": slot['end']
                 })
                 
-                # Marquer tout occupé
                 occupied_slots.add(slot['id'])
                 busy_jurys_at_slot[slot['key']].add(tuteur)
                 busy_jurys_at_slot[slot['key']].add(best_cj)
                 
-                # Mettre à jour les structures de contiguïté
                 self.jury_occupied_times[tuteur].add(slot['start'])
                 self.jury_occupied_times[best_cj].add(slot['start'])
                 self.jury_occupied_days[tuteur].add(slot['jour'])
                 self.jury_occupied_days[best_cj].add(slot['jour'])
                 
-                # Mettre à jour charges
                 self.charge_tuteur[tuteur] += 1
                 self.charge_cojury[best_cj] += 1
-                
                 placed = True
-                break # Sortir de la boucle des slots, étudiant placé
+                break
             
             if not placed: unassigned.append(etu)
             
@@ -339,7 +357,7 @@ with st.sidebar:
 
 if st.session_state.etape == 1:
     st.title("1. Import des Étudiants")
-    f = st.file_uploader("Fichier CSV (celui avec NOM, PRENOM, ENSEIGNANT REFERENT...)", type=['csv', 'xlsx'])
+    f = st.file_uploader("Fichier CSV Étudiants", type=['csv', 'xlsx'])
     if f:
         data, err = importer_etudiants(f)
         if err: st.error(err)
@@ -359,17 +377,16 @@ elif st.session_state.etape == 2:
 
 elif st.session_state.etape == 3:
     st.title("3. Dates")
-    st.info("Sélectionnez les jours exacts de votre CSV (26, 27, 29 Janvier 2026).")
+    st.info("Sélectionnez les jours exacts de votre CSV (ex: 26, 27, 29 Janvier 2026).")
     nb = st.number_input("Nb Jours", 1, 5, max(3, len(st.session_state.dates)))
     ds = []
     cols = st.columns(4)
     for i in range(nb):
-        # Aide à la saisie : initialise à 2026
         d_def = st.session_state.dates[i] if i < len(st.session_state.dates) else datetime(2026, 1, 26).date() + timedelta(days=i)
         ds.append(cols[i%4].date_input(f"Jour {i+1}", d_def))
     st.session_state.dates = ds
     
-    st.subheader("Co-jurys supplémentaires (Optionnel)")
+    st.subheader("Co-jurys supplémentaires")
     txt = st.text_input("Nom du co-jury")
     if txt and txt not in st.session_state.co_jurys: st.session_state.co_jurys.append(txt)
     if st.session_state.co_jurys: st.write(st.session_state.co_jurys)
@@ -385,14 +402,14 @@ elif st.session_state.etape == 4:
         k = s['key'].split(" | ")
         mapping_config[k[0]].append(k[1])
     
-    f = st.file_uploader("Fichier Disponibilités (CSV avec virgules ou points-virgules)", type=['csv'])
+    f = st.file_uploader("Fichier Disponibilités", type=['csv'])
     if f:
         tuteurs_propres = [e['Tuteur'] for e in st.session_state.etudiants if e['Tuteur']]
         dispos, treated, logs = importer_disponibilites(f, tuteurs_propres, st.session_state.co_jurys, mapping_config)
         
         if dispos:
             st.session_state.disponibilites = dispos
-            st.success(f"✅ {len(dispos)} personnes importées avec succès.")
+            st.success(f"✅ {len(dispos)} personnes importées.")
             with st.expander("Voir les détails / Erreurs"):
                 for l in logs: st.write(l)
                 st.write("Reconnus :", treated)
@@ -404,7 +421,7 @@ elif st.session_state.etape == 4:
 
 elif st.session_state.etape == 5:
     st.title("5. Génération Optimisée")
-    st.markdown("💡 L'algorithme va essayer de **grouper** les soutenances d'un même jury pour éviter les trous.")
+    st.markdown("💡 L'algorithme groupe les soutenances pour éviter les trous dans l'emploi du temps.")
     
     if st.button("Lancer la planification", type="primary"):
         eng = SchedulerEngine(
@@ -424,7 +441,6 @@ elif st.session_state.etape == 5:
         with tab1: st.dataframe(df)
         with tab2:
             if not df.empty:
-                # Tri par salle et heure pour le Gantt
                 df = df.sort_values(by=['Jour', 'Heure'])
                 fig = px.timeline(df, x_start="Début", x_end="Fin", y="Tuteur", color="Jour", text="Étudiant")
                 fig.update_yaxes(autorange="reversed")
