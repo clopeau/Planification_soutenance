@@ -10,7 +10,7 @@ import re
 import random
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Planification Soutenances v3", layout="wide", page_icon="🎓")
+st.set_page_config(page_title="Planification Soutenances v4 (Contiguïté)", layout="wide", page_icon="🎓")
 
 # --- STYLES CSS ---
 st.markdown("""
@@ -51,13 +51,13 @@ def lire_csv_robuste(uploaded_file):
     uploaded_file.seek(0)
     content = uploaded_file.getvalue()
     encodings = ['utf-8', 'latin-1', 'cp1252']
-    separators = [';', ','] # Priorité au point-virgule pour le fichier étudiant
+    separators = [';', ','] 
     
     for enc in encodings:
         try:
             decoded = content.decode(enc)
             for sep in separators:
-                if decoded.count(sep) > decoded.count('\n'): # Heuristique simple
+                if decoded.count(sep) > decoded.count('\n'):
                     return pd.read_csv(StringIO(decoded), sep=sep), None
         except: continue
     
@@ -67,39 +67,25 @@ def importer_etudiants(uploaded_file):
     df, error = lire_csv_robuste(uploaded_file)
     if error: return [], error
     
-    # Normalisation des colonnes (Majuscules, sans accents pour la recherche)
-    # Ex: "Enseignant référent (NOM Prénom)" -> "ENSEIGNANT REFERENT NOM PRENOM"
     raw_cols = list(df.columns)
     cols_normalized = {c: c.upper().replace('É','E').replace('È','E').replace('Ê','E') for c in raw_cols}
-    
     col_map = {}
     
-    # 1. Recherche Prénom
-    for real_c, norm_c in cols_normalized.items():
-        if "PRENOM" in norm_c and "NOM" not in norm_c: col_map['prenom'] = real_c; break # Juste PRENOM
-    
-    # 2. Recherche Nom (Le nom de l'étudiant, pas celui du prof)
-    for real_c, norm_c in cols_normalized.items():
-        if "NOM" in norm_c and "PRENOM" not in norm_c and "REFERENT" not in norm_c and "ENSEIGNANT" not in norm_c: 
-            col_map['nom'] = real_c; break
-            
-    # 3. Recherche Tuteur (Enseignant Référent)
-    for real_c, norm_c in cols_normalized.items():
-        if "REFERENT" in norm_c or "ENSEIGNANT" in norm_c or "TUTEUR" in norm_c:
-            col_map['tuteur'] = real_c; break
-            
-    # 4. Recherche Pays
-    for real_c, norm_c in cols_normalized.items():
-        if "SERVICE" in norm_c and "PAYS" in norm_c: col_map['pays'] = real_c; break
+    for c_up, c_real in cols_normalized.items():
+        if "PRENOM" in c_up and "NOM" not in c_up: col_map['prenom'] = c_real; break
+    for c_up, c_real in cols_normalized.items():
+        if "NOM" in c_up and "PRENOM" not in c_up and "REFERENT" not in c_up and "ENSEIGNANT" not in c_up: col_map['nom'] = c_real; break
+    for c_up, c_real in cols_normalized.items():
+        if "REFERENT" in c_up or "ENSEIGNANT" in c_up or "TUTEUR" in c_up: col_map['tuteur'] = c_real; break
+    for c_up, c_real in cols_normalized.items():
+        if "SERVICE" in c_up and "PAYS" in c_up: col_map['pays'] = c_real; break
     if 'pays' not in col_map:
-        for real_c, norm_c in cols_normalized.items():
-            if "PAYS" in norm_c: col_map['pays'] = real_c; break
+        for c_up, c_real in cols_normalized.items():
+            if "PAYS" in c_up: col_map['pays'] = c_real; break
 
-    # Vérification
     required = ['nom', 'tuteur']
     missing = [r for r in required if r not in col_map]
-    if missing:
-        return [], f"Colonnes introuvables : {missing}. Colonnes lues : {raw_cols}"
+    if missing: return [], f"Colonnes introuvables : {missing}. Colonnes lues : {raw_cols}"
 
     etudiants = []
     for _, row in df.iterrows():
@@ -108,14 +94,8 @@ def importer_etudiants(uploaded_file):
         tuteur = clean_str(row.get(col_map.get('tuteur')))
         pays = clean_str(row.get(col_map.get('pays'), ''))
         
-        # On ne garde que si Nom et Tuteur existent
         if nom and tuteur:
-            etudiants.append({
-                "Prénom": prenom,
-                "Nom": nom,
-                "Pays": pays,
-                "Tuteur": tuteur
-            })
+            etudiants.append({"Prénom": prenom, "Nom": nom, "Pays": pays, "Tuteur": tuteur})
             
     return etudiants, None
 
@@ -123,14 +103,9 @@ def importer_disponibilites(uploaded_file, tuteurs_connus, co_jurys_connus, hora
     df, error = lire_csv_robuste(uploaded_file)
     if error: return [], [], [error]
     
-    # Nettoyage de la liste des tuteurs connus pour le matching
-    # IMPORTANT : Enlever les 'nan', les vides, etc.
     personnes_reconnues = {p for p in (tuteurs_connus + co_jurys_connus) if p and str(p).lower() != 'nan'}
-    
-    if not personnes_reconnues:
-        return {}, [], ["Aucun tuteur valide n'a été trouvé à l'étape 1. Impossible de faire le rapprochement."]
+    if not personnes_reconnues: return {}, [], ["Aucun tuteur valide n'a été trouvé à l'étape 1."]
 
-    # Détection des colonnes dates
     date_cols_map = {} 
     for col in df.columns:
         match = re.search(r"(\d{2}/\d{2}/\d{4}).*?(\d{2}:\d{2})", str(col))
@@ -143,39 +118,27 @@ def importer_disponibilites(uploaded_file, tuteurs_connus, co_jurys_connus, hora
                             date_cols_map[col] = f"{jour_app} | {c}"
                             break
     
-    if not date_cols_map:
-        return {}, [], ["Aucune colonne de date (ex: 26/01/2026) reconnue. Vérifiez l'année à l'étape 5."]
+    if not date_cols_map: return {}, [], ["Aucune colonne de date (ex: 26/01/2026) reconnue. Vérifiez l'année à l'étape 5."]
 
     dispos_data = {}
     logs = []
     treated = set()
-    
     col_nom = df.columns[0]
     
     for _, row in df.iterrows():
         nom_brut = clean_str(row[col_nom])
         if not nom_brut: continue
-        
-        # Fuzzy Matching
-        best_match = None
-        best_score = 0
-        
+        best_match, best_score = None, 0
         for p in personnes_reconnues:
-            # Token Sort Ratio gère "NOM Prénom" vs "Prénom NOM"
             score = fuzz.token_sort_ratio(nom_brut.lower(), p.lower())
-            if score > best_score:
-                best_score = score
-                best_match = p
+            if score > best_score: best_score, best_match = score, p
         
-        # Seuil à 70 pour être tolérant mais pas trop
         if best_score >= 70:
             final_name = best_match
             if final_name not in dispos_data: dispos_data[final_name] = {}
-            
             for col_csv, key_app in date_cols_map.items():
                 val = row.get(col_csv, 0)
                 try:
-                    # Gestion du "1", "0", 1.0, 0.0
                     is_open = bool(int(float(val))) if pd.notna(val) else False
                     dispos_data[final_name][key_app] = is_open
                 except: pass
@@ -185,7 +148,7 @@ def importer_disponibilites(uploaded_file, tuteurs_connus, co_jurys_connus, hora
             
     return dispos_data, list(treated), logs
 
-# --- MOTEUR DE PLANIFICATION (GLOUTON) ---
+# --- MOTEUR DE PLANIFICATION (GLOUTON + CONTIGUÏTÉ) ---
 
 class SchedulerEngine:
     def __init__(self, etudiants, dates, nb_salles, duree, dispos, co_jurys_pool):
@@ -197,8 +160,15 @@ class SchedulerEngine:
         self.co_jurys_pool = list(set(co_jurys_pool))
         self.slots = self._generate_slots()
         
+        # Statistiques de charge
         self.charge_tuteur = defaultdict(int)
         self.charge_cojury = defaultdict(int)
+        
+        # Suivi précis pour la contiguïté (Qui est occupé quand ?)
+        # Format: self.jury_occupied_times[NomJury] = set(datetime_debut)
+        self.jury_occupied_times = defaultdict(set)
+        # Format: self.jury_occupied_days[NomJury] = set(jour_str)
+        self.jury_occupied_days = defaultdict(set)
         
         self.tuteurs_actifs = list(set(e['Tuteur'] for e in etudiants if e['Tuteur']))
         self.all_possible_jurys = list(set(self.co_jurys_pool + self.tuteurs_actifs))
@@ -234,44 +204,97 @@ class SchedulerEngine:
     def solve(self):
         planning = []
         unassigned = []
-        occupied_slots = set()
-        busy_jurys = defaultdict(set) # key -> set(noms)
+        occupied_slots = set() # Par ID de créneau (salle/heure)
+        busy_jurys_at_slot = defaultdict(set) # Par clé temps (jour/heure)
         
-        # Trier étudiants par rareté du tuteur
+        # 1. TRI DES ÉTUDIANTS (Les plus contraints en premier)
         student_queue = []
         for etu in self.etudiants:
             tut = etu['Tuteur']
+            # Nb de créneaux dispos pour ce tuteur
             nb = sum(1 for v in self.dispos.get(tut, {}).values() if v)
-            student_queue.append((nb, etu))
+            # On ajoute un petit random pour casser les égalités parfaites
+            student_queue.append((nb, random.random(), etu))
+        
+        # Tri croissant (moins de dispos = prioritaire)
         student_queue.sort(key=lambda x: x[0])
         
-        for _, etu in student_queue:
+        # 2. PLACEMENT
+        for _, _, etu in student_queue:
             tuteur = etu['Tuteur']
             placed = False
             
-            # Mélange pour équilibrer les jours
-            my_slots = self.slots.copy()
-            random.shuffle(my_slots) # Important pour ne pas bourrer le lundi matin
+            # --- ALGORITHME DE CONTIGUÏTÉ ---
+            # On va trier les slots disponibles pour ce tuteur
+            # Critères de tri :
+            # 1. Adjacence immédiate (Tuteur déjà là juste avant ou juste après) -> +100 pts
+            # 2. Même jour (Tuteur déjà là ce jour là) -> +10 pts
+            # 3. Ordre chronologique (pour remplir le matin d'abord par défaut) -> -timestamp
             
-            for slot in my_slots:
+            candidate_slots = []
+            
+            for slot in self.slots:
+                # Filtres durs
                 if slot['id'] in occupied_slots: continue
-                if tuteur in busy_jurys[slot['key']]: continue
+                if tuteur in busy_jurys_at_slot[slot['key']]: continue
                 if not self.is_available(tuteur, slot['key']): continue
                 
-                # Trouver co-jury
-                candidates = []
+                # Calcul du score de contiguïté pour le TUTEUR
+                score = 0
+                t_start = slot['start']
+                t_prev = t_start - timedelta(minutes=self.duree)
+                t_next = slot['end'] # Car end = start + duree
+                
+                # Est-il occupé juste avant ?
+                if t_prev in self.jury_occupied_times[tuteur]: score += 100
+                # Est-il occupé juste après ?
+                if t_next in self.jury_occupied_times[tuteur]: score += 100
+                # Est-il occupé ce jour-là ?
+                if slot['jour'] in self.jury_occupied_days[tuteur]: score += 10
+                
+                # Ajout à la liste des candidats
+                candidate_slots.append((score, slot))
+            
+            # Tri des slots : Score décroissant (le plus haut en premier), puis chronologique
+            # random.random() permet de varier les salles si égalité parfaite
+            candidate_slots.sort(key=lambda x: (x[0], x[1]['start'].timestamp(), random.random()), reverse=True)
+            
+            # Essayer de placer dans le meilleur slot
+            for score_slot, slot in candidate_slots:
+                
+                # Trouver un CO-JURY
+                # On applique aussi la logique de contiguïté pour le co-jury !
+                cj_candidates = []
+                
                 for cj in self.all_possible_jurys:
                     if cj == tuteur: continue
-                    if cj in busy_jurys[slot['key']]: continue
+                    if cj in busy_jurys_at_slot[slot['key']]: continue
                     if not self.is_available(cj, slot['key']): continue
-                    candidates.append(cj)
+                    
+                    # Score Co-jury
+                    cj_score = 0
+                    t_start = slot['start']
+                    t_prev = t_start - timedelta(minutes=self.duree)
+                    t_next = slot['end']
+                    
+                    if t_prev in self.jury_occupied_times[cj]: cj_score += 100
+                    if t_next in self.jury_occupied_times[cj]: cj_score += 100
+                    if slot['jour'] in self.jury_occupied_days[cj]: cj_score += 10
+                    
+                    # On veut :
+                    # 1. Maximiser la contiguïté (cj_score haut)
+                    # 2. Minimiser la charge de travail (charge_cojury bas)
+                    cj_candidates.append((cj_score, self.charge_cojury[cj], cj))
                 
-                if not candidates: continue
+                if not cj_candidates: continue
                 
-                # Prendre celui qui a le moins de charge
-                candidates.sort(key=lambda x: (self.charge_cojury[x], self.charge_tuteur[x]))
-                best_cj = candidates[0]
+                # Tri des co-jurys : Score DESC, Charge ASC
+                # Astuce python : on trie par (-score, charge) pour avoir score max et charge min
+                cj_candidates.sort(key=lambda x: (-x[0], x[1]))
                 
+                best_cj = cj_candidates[0][2]
+                
+                # --- VALIDATION DU PLACEMENT ---
                 planning.append({
                     "Étudiant": f"{etu['Prénom']} {etu['Nom']}",
                     "Tuteur": tuteur, "Co-jury": best_cj,
@@ -279,13 +302,23 @@ class SchedulerEngine:
                     "Salle": slot['salle'], "Début": slot['start'], "Fin": slot['end']
                 })
                 
+                # Marquer tout occupé
                 occupied_slots.add(slot['id'])
-                busy_jurys[slot['key']].add(tuteur)
-                busy_jurys[slot['key']].add(best_cj)
+                busy_jurys_at_slot[slot['key']].add(tuteur)
+                busy_jurys_at_slot[slot['key']].add(best_cj)
+                
+                # Mettre à jour les structures de contiguïté
+                self.jury_occupied_times[tuteur].add(slot['start'])
+                self.jury_occupied_times[best_cj].add(slot['start'])
+                self.jury_occupied_days[tuteur].add(slot['jour'])
+                self.jury_occupied_days[best_cj].add(slot['jour'])
+                
+                # Mettre à jour charges
                 self.charge_tuteur[tuteur] += 1
                 self.charge_cojury[best_cj] += 1
+                
                 placed = True
-                break
+                break # Sortir de la boucle des slots, étudiant placé
             
             if not placed: unassigned.append(etu)
             
@@ -346,7 +379,6 @@ elif st.session_state.etape == 3:
 elif st.session_state.etape == 4:
     st.title("4. Import Disponibilités")
     
-    # Génération config horaires pour mapping
     eng = SchedulerEngine([], st.session_state.dates, 1, st.session_state.duree, {}, [])
     mapping_config = defaultdict(list)
     for s in eng.slots:
@@ -355,9 +387,7 @@ elif st.session_state.etape == 4:
     
     f = st.file_uploader("Fichier Disponibilités (CSV avec virgules ou points-virgules)", type=['csv'])
     if f:
-        # Récupérer liste tuteurs propres (sans nan)
         tuteurs_propres = [e['Tuteur'] for e in st.session_state.etudiants if e['Tuteur']]
-        
         dispos, treated, logs = importer_disponibilites(f, tuteurs_propres, st.session_state.co_jurys, mapping_config)
         
         if dispos:
@@ -373,7 +403,8 @@ elif st.session_state.etape == 4:
     if st.button("Suivant"): st.session_state.etape = 5; st.rerun()
 
 elif st.session_state.etape == 5:
-    st.title("5. Génération")
+    st.title("5. Génération Optimisée")
+    st.markdown("💡 L'algorithme va essayer de **grouper** les soutenances d'un même jury pour éviter les trous.")
     
     if st.button("Lancer la planification", type="primary"):
         eng = SchedulerEngine(
@@ -393,8 +424,11 @@ elif st.session_state.etape == 5:
         with tab1: st.dataframe(df)
         with tab2:
             if not df.empty:
-                fig = px.timeline(df, x_start="Début", x_end="Fin", y="Tuteur", color="Jour")
-                st.plotly_chart(fig)
+                # Tri par salle et heure pour le Gantt
+                df = df.sort_values(by=['Jour', 'Heure'])
+                fig = px.timeline(df, x_start="Début", x_end="Fin", y="Tuteur", color="Jour", text="Étudiant")
+                fig.update_yaxes(autorange="reversed")
+                st.plotly_chart(fig, use_container_width=True)
         
         csv = df.to_csv(index=False, sep=';').encode('utf-8')
         st.download_button("Télécharger CSV", csv, "planning.csv", "text/csv")
