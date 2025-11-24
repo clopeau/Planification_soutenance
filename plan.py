@@ -11,7 +11,7 @@ import random
 import unicodedata
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Planification Soutenances v16 (Noms Excel)", layout="wide", page_icon="🎓")
+st.set_page_config(page_title="Planification Soutenances v18 (Salles & Filières)", layout="wide", page_icon="🎓")
 
 # --- STYLES ---
 st.markdown("""
@@ -32,51 +32,28 @@ for key, value in DEFAULT_STATE.items():
 
 # --- HELPER: Extraction Nom ---
 def extract_nom_only(fullname):
-    """
-    Tente d'extraire uniquement le nom de famille.
-    Logique : Cherche les parties en MAJUSCULES (standard académique).
-    Si 'DUPONT Jean' -> 'DUPONT'. Si 'Jean DUPONT' -> 'DUPONT'.
-    Fallback : Prend le premier mot.
-    """
-    if not isinstance(fullname, str) or not fullname:
-        return ""
-    
+    if not isinstance(fullname, str) or not fullname: return ""
     parts = fullname.strip().split()
-    # On garde les mots qui sont tout en majuscules (et plus d'une lettre pour éviter les initiales isolées type J.)
     upper_parts = [p for p in parts if p.isupper() and len(p) > 1]
-    
-    # Cas particuliers (particules type DE, LE qui sont en majuscule)
-    # Si on a trouvé des majuscules, on les retourne
-    if upper_parts:
-        return " ".join(upper_parts)
-    
-    # Sinon, on retourne le premier mot (supposition format: Nom Prénom)
+    if upper_parts: return " ".join(upper_parts)
     return parts[0] if parts else ""
 
 # --- EXPORT EXCEL AVANCE ---
 def generate_excel_planning(planning_data, nb_salles):
-    """Génère un fichier Excel formaté selon la demande (Feuille/Jour, Colonne/Salle)."""
     output = BytesIO()
-    if not planning_data:
-        return output
-        
+    if not planning_data: return output
     df = pd.DataFrame(planning_data)
-    
-    # Créneaux théoriques
     slots_matin = ["08:00", "08:50", "09:40", "10:30", "11:20", "12:10"]
     slots_aprem = ["14:00", "14:50", "15:40", "16:30", "17:20"]
     
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         workbook = writer.book
-        
-        # --- STYLES ---
         fmt_header = workbook.add_format({'bold': True, 'align': 'center', 'bg_color': '#D9E1F2', 'border': 1})
         fmt_pause = workbook.add_format({'bold': True, 'align': 'center', 'bg_color': '#FFF2CC', 'border': 1})
         fmt_cell = workbook.add_format({'border': 1, 'text_wrap': True, 'valign': 'vcenter'})
         fmt_time = workbook.add_format({'bold': True, 'border': 1, 'align': 'center', 'valign': 'vcenter'})
         fmt_room = workbook.add_format({'bold': True, 'align': 'center', 'font_size': 14, 'border': 1})
 
-        # Trier les jours
         try:
             unique_days = sorted(df['Jour'].unique(), key=lambda x: datetime.strptime(x.split(" ")[1], "%d/%m/%Y"))
         except:
@@ -85,42 +62,29 @@ def generate_excel_planning(planning_data, nb_salles):
         for jour in unique_days:
             sheet_name = re.sub(r'[\\/*?:\[\]]', "", str(jour))[:31]
             worksheet = workbook.add_worksheet(sheet_name)
-            
             df_jour = df[df['Jour'] == jour]
             salles_theoriques = [f"Salle {i}" for i in range(1, nb_salles + 1)]
-            
             col_offset = 0
             
             for salle in salles_theoriques:
-                # Entête Salle
                 worksheet.merge_range(0, col_offset, 0, col_offset + 2, salle, fmt_room)
-                
-                # Sous-titres
                 worksheet.write(1, col_offset, "Heure", fmt_header)
                 worksheet.write(1, col_offset + 1, "Etudiant", fmt_header)
                 worksheet.write(1, col_offset + 2, "Jury + Co-jury", fmt_header)
-                
-                # Largeur colonnes
-                worksheet.set_column(col_offset, col_offset, 8)     # Heure
-                worksheet.set_column(col_offset + 1, col_offset + 1, 30) # Etudiant
-                worksheet.set_column(col_offset + 2, col_offset + 2, 30) # Jury
+                worksheet.set_column(col_offset, col_offset, 8)
+                worksheet.set_column(col_offset + 1, col_offset + 1, 30)
+                worksheet.set_column(col_offset + 2, col_offset + 2, 30)
                 
                 row_idx = 2
-                
-                # MATIN
                 for slot in slots_matin:
                     match = df_jour[(df_jour['Salle'] == salle) & (df_jour['Heure'].str.startswith(slot))]
                     worksheet.write(row_idx, col_offset, slot, fmt_time)
                     if not match.empty:
                         data = match.iloc[0]
                         etu_txt = f"{data['Étudiant']} ({data['Pays']})" if data['Pays'] else data['Étudiant']
-                        
-                        # --- MODIFICATION ICI : Utilisation de extract_nom_only ---
                         nom_tuteur = extract_nom_only(data['Tuteur'])
                         nom_cojury = extract_nom_only(data['Co-jury'])
                         jury_txt = f"{nom_tuteur} + {nom_cojury}"
-                        # ----------------------------------------------------------
-                        
                         worksheet.write(row_idx, col_offset + 1, etu_txt, fmt_cell)
                         worksheet.write(row_idx, col_offset + 2, jury_txt, fmt_cell)
                     else:
@@ -128,36 +92,28 @@ def generate_excel_planning(planning_data, nb_salles):
                         worksheet.write(row_idx, col_offset + 2, "", fmt_cell)
                     row_idx += 1
                 
-                # PAUSE
                 worksheet.merge_range(row_idx, col_offset, row_idx, col_offset + 2, "PAUSE", fmt_pause)
                 row_idx += 1
                 
-                # APRES-MIDI
                 for slot in slots_aprem:
                     match = df_jour[(df_jour['Salle'] == salle) & (df_jour['Heure'].str.startswith(slot))]
                     worksheet.write(row_idx, col_offset, slot, fmt_time)
                     if not match.empty:
                         data = match.iloc[0]
                         etu_txt = f"{data['Étudiant']} ({data['Pays']})" if data['Pays'] else data['Étudiant']
-                        
-                        # --- MODIFICATION ICI ---
                         nom_tuteur = extract_nom_only(data['Tuteur'])
                         nom_cojury = extract_nom_only(data['Co-jury'])
                         jury_txt = f"{nom_tuteur} + {nom_cojury}"
-                        # ------------------------
-                        
                         worksheet.write(row_idx, col_offset + 1, etu_txt, fmt_cell)
                         worksheet.write(row_idx, col_offset + 2, jury_txt, fmt_cell)
                     else:
                         worksheet.write(row_idx, col_offset + 1, "", fmt_cell)
                         worksheet.write(row_idx, col_offset + 2, "", fmt_cell)
                     row_idx += 1
-                
                 col_offset += 4
-
     return output.getvalue()
 
-# --- HELPERS & IMPORTERS ---
+# --- IMPORTERS ---
 def clean_str(val):
     if pd.isna(val) or str(val).lower() in ['nan', 'none', '']: return ""
     val = str(val).replace('\n', ' ').replace('\r', '').strip()
@@ -166,7 +122,7 @@ def clean_str(val):
 def normalize_text(text):
     if not isinstance(text, str): return str(text)
     text = text.upper().strip()
-    text = "".join(text.split()) # remove all spaces
+    text = "".join(text.split())
     text = unicodedata.normalize('NFD', text).encode('ascii', 'ignore').decode("utf-8")
     return text
 
@@ -224,8 +180,6 @@ def importer_disponibilites(uploaded_file, tuteurs_connus, co_jurys_connus, hora
     if error: return [], [], [], [error]
     
     personnes_reconnues = {p for p in (tuteurs_connus + co_jurys_connus) if p and str(p).lower() != 'nan'}
-    
-    # Mapping des dates
     date_cols_map = {} 
     for col in df.columns:
         match = re.search(r"(\d{2}/\d{2}/\d{4}).*?(\d{2}:\d{2})", str(col))
@@ -238,7 +192,6 @@ def importer_disponibilites(uploaded_file, tuteurs_connus, co_jurys_connus, hora
     
     if not date_cols_map: return {}, [], {}, ["Pas de colonnes dates valides."]
 
-    # Recherche de la colonne FILIERE
     col_filiere = None
     for c in df.columns:
         if "FILIERE" in str(c).upper() or "DEPARTEMENT" in str(c).upper():
@@ -251,7 +204,6 @@ def importer_disponibilites(uploaded_file, tuteurs_connus, co_jurys_connus, hora
     for _, row in df.iterrows():
         nom_brut = clean_str(row[col_nom])
         if not nom_brut: continue
-        
         best_match, best_score = None, 0
         for p in personnes_reconnues:
             score = fuzz.token_sort_ratio(nom_brut.lower(), p.lower())
@@ -260,12 +212,9 @@ def importer_disponibilites(uploaded_file, tuteurs_connus, co_jurys_connus, hora
         if best_score >= 60:
             final_name = best_match
             if final_name not in dispos_data: dispos_data[final_name] = {}
-            
             if col_filiere:
                 filiere_val = clean_str(row.get(col_filiere, "")).upper()
-                if filiere_val:
-                    filieres_data[final_name] = filiere_val
-
+                if filiere_val: filieres_data[final_name] = filiere_val
             for col_csv, key_app in date_cols_map.items():
                 val = row.get(col_csv, 0)
                 try:
@@ -280,14 +229,9 @@ def importer_disponibilites(uploaded_file, tuteurs_connus, co_jurys_connus, hora
 # --- MOTEUR ---
 class SchedulerEngine:
     def __init__(self, etudiants, dates, nb_salles, duree, dispos, filieres, co_jurys_pool, params):
-        self.etudiants = etudiants
-        self.nb_salles = nb_salles
-        self.duree = duree
-        self.dispos = dispos
-        self.filieres = filieres
-        self.dates = dates
-        self.co_jurys_pool = list(set(co_jurys_pool))
-        self.params = params
+        self.etudiants = etudiants; self.nb_salles = nb_salles; self.duree = duree
+        self.dispos = dispos; self.filieres = filieres; self.dates = dates
+        self.co_jurys_pool = list(set(co_jurys_pool)); self.params = params
         self.slots = self._generate_slots()
         self.target_cojury = defaultdict(int)
         for e in self.etudiants: self.target_cojury[e['Tuteur']] += 1
@@ -336,6 +280,9 @@ class SchedulerEngine:
         charge_t = defaultdict(int); charge_c = defaultdict(int)
         jury_times = defaultdict(set); jury_days = defaultdict(set)
         
+        # NOUVEAU: Suivi des salles par jury par jour (Clé: (nom, jour), Valeur: set(salles))
+        jury_rooms = defaultdict(set)
+        
         student_queue = []
         for etu in self.etudiants:
             tut = etu['Tuteur']
@@ -346,7 +293,6 @@ class SchedulerEngine:
         for _, etu in student_queue:
             tuteur = etu['Tuteur']
             f_tut = self.filieres.get(tuteur)
-            
             best_move = None; best_score = -float('inf')
             slots_shuffled = self.slots.copy(); random.shuffle(slots_shuffled)
             valid_slots = []
@@ -360,30 +306,42 @@ class SchedulerEngine:
             if not valid_slots: unassigned.append(etu); continue
             
             for slot in valid_slots:
+                # --- SCORE TUTEUR ---
                 t_score = 0
                 t_prev = slot['start'] - timedelta(minutes=self.duree); t_next = slot['end']
+                
+                # Contiguïté (temps)
                 if t_prev in jury_times[tuteur]: t_score += self.params['w_contiguity']
                 if t_next in jury_times[tuteur]: t_score += self.params['w_contiguity']
                 if slot['jour'] in jury_days[tuteur]: t_score += self.params['w_day']
                 
+                # Stabilité Salle (Tuteur)
+                # Si le tuteur est déjà dans une salle ce jour-là, on privilégie cette salle
+                if (tuteur, slot['jour']) in jury_rooms:
+                    if slot['salle'] in jury_rooms[(tuteur, slot['jour'])]:
+                        t_score += self.params['w_room']
+                
                 for cj in self.all_possible_jurys:
                     if cj == tuteur: continue
-                    
                     f_cj = self.filieres.get(cj)
-                    if f_tut and f_cj and f_tut != f_cj:
-                        continue
+                    if f_tut and f_cj and f_tut != f_cj: continue # Contrainte Filiere
 
                     if cj in busy_jurys[slot['key']]: continue
                     if not self.is_available(cj, slot['key']): continue
                     
+                    # --- SCORE CO-JURY ---
                     cj_score = 0
                     if t_prev in jury_times[cj]: cj_score += self.params['w_contiguity']
                     if t_next in jury_times[cj]: cj_score += self.params['w_contiguity']
                     if slot['jour'] in jury_days[cj]: cj_score += self.params['w_day']
                     
+                    # Stabilité Salle (Co-jury)
+                    if (cj, slot['jour']) in jury_rooms:
+                        if slot['salle'] in jury_rooms[(cj, slot['jour'])]:
+                            cj_score += self.params['w_room']
+                    
                     bal_score = (self.target_cojury[cj] - charge_c[cj]) * self.params['w_balance']
                     total = t_score + cj_score + bal_score + random.uniform(0, self.params['w_random'])
-                    
                     if total > best_score: best_score = total; best_move = (slot, cj)
             
             if best_move:
@@ -391,7 +349,10 @@ class SchedulerEngine:
                 planning.append({"Étudiant": f"{etu['Prénom']} {etu['Nom']}", "Pays": etu['Pays'], "Tuteur": tuteur, "Co-jury": best_cj, "Jour": slot['jour'], "Heure": slot['heure'], "Salle": slot['salle'], "Début": slot['start'], "Fin": slot['end']})
                 occupied_slots.add(slot['id'])
                 busy_jurys[slot['key']].add(tuteur); busy_jurys[slot['key']].add(best_cj)
-                for p in [tuteur, best_cj]: jury_times[p].add(slot['start']); jury_days[p].add(slot['jour'])
+                for p in [tuteur, best_cj]: 
+                    jury_times[p].add(slot['start'])
+                    jury_days[p].add(slot['jour'])
+                    jury_rooms[(p, slot['jour'])].add(slot['salle']) # Enregistrement de la salle
                 charge_t[tuteur] += 1; charge_c[best_cj] += 1
             else: unassigned.append(etu)
             
@@ -410,7 +371,7 @@ with st.sidebar:
     st.write(f"Étudiants : {len(st.session_state.etudiants)}")
     st.write(f"Dispos Tuteurs : {len(st.session_state.disponibilites)}")
     if 'filieres' in st.session_state:
-        st.write(f"Filières détectées : {len(st.session_state.filieres)}")
+        st.write(f"Filières : {len(set(st.session_state.filieres.values()))}")
 
 if st.session_state.etape == 1:
     st.title("1. Import des Étudiants")
@@ -447,7 +408,7 @@ elif st.session_state.etape == 3:
 
 elif st.session_state.etape == 4:
     st.title("4. Import Disponibilités")
-    st.info("Le fichier doit contenir une colonne nommée 'FILIERE' pour activer la contrainte de filière.")
+    st.info("Le fichier doit contenir une colonne nommée 'FILIERE'.")
     eng = SchedulerEngine([], st.session_state.dates, 1, st.session_state.duree, {}, {}, [], {})
     mapping_config = defaultdict(list)
     for s in eng.slots: k = s['key'].split(" | "); mapping_config[k[0]].append(k[1])
@@ -458,15 +419,24 @@ elif st.session_state.etape == 4:
         if dispos:
             st.session_state.disponibilites = dispos
             st.session_state.filieres = filieres
-            st.success(f"✅ {len(dispos)} profils importés.")
-            if filieres:
-                st.success(f"✅ {len(filieres)} filières associées trouvées.")
-            else:
-                st.warning("⚠️ Aucune colonne 'FILIERE' trouvée. La contrainte ne sera pas appliquée.")
             
+            nb_profs_fil = len(filieres)
+            nb_types_fil = len(set(filieres.values()))
+            st.success(f"✅ {len(dispos)} enseignants importés.")
+            if nb_types_fil > 0:
+                st.success(f"✅ {nb_profs_fil} enseignants avec filière détectée ({nb_types_fil} filières distinctes).")
+            else:
+                st.warning("⚠️ Aucune filière détectée (vérifiez la colonne 'FILIERE').")
+            
+            tuteurs_actifs = set(e['Tuteur'] for e in st.session_state.etudiants)
+            sans_filiere = [t for t in tuteurs_actifs if t not in filieres]
+            if sans_filiere:
+                st.warning(f"⚠️ Attention : {len(sans_filiere)} tuteurs actifs n'ont pas de filière définie :")
+                st.write(sans_filiere)
+
             with st.expander("Logs"): 
                 for l in logs: st.write(l)
-        else: st.error("Erreur import."); 
+        else: st.error("Erreur import.")
     if st.button("Suivant"): st.session_state.etape = 5; st.rerun()
 
 elif st.session_state.etape == 5:
@@ -476,20 +446,23 @@ elif st.session_state.etape == 5:
         n_iter = c1.slider("Itérations", 10, 200, 50)
         w_rand = c2.slider("Exploration", 0, 500, 100)
         c3, c4 = st.columns(2)
-        w_cont = c3.slider("Poids Contiguïté", 0, 5000, 2000)
-        w_bal = c4.slider("Poids Équilibre", 0, 2000, 500)
+        w_cont = c3.slider("Poids Contiguïté (Temps)", 0, 5000, 2000)
+        w_bal = c4.slider("Poids Équilibre (Charge)", 0, 2000, 500)
+        
+        # --- NOUVEAU CONTROLE ---
+        st.divider()
+        w_room = st.slider("Poids Stabilité Salle (Ne pas changer de salle)", 0, 5000, 3000, help="Favorise fortement le fait de rester dans la même salle toute la journée.")
     
     if st.button("Lancer", type="primary"):
-        params = {"n_iterations": n_iter, "w_random": w_rand, "w_contiguity": w_cont, "w_balance": w_bal, "w_day": 100}
+        # Ajout w_room aux params
+        params = {
+            "n_iterations": n_iter, "w_random": w_rand, 
+            "w_contiguity": w_cont, "w_balance": w_bal, 
+            "w_day": 100, "w_room": w_room
+        }
         eng = SchedulerEngine(
-            st.session_state.etudiants, 
-            st.session_state.dates, 
-            st.session_state.nb_salles, 
-            st.session_state.duree, 
-            st.session_state.disponibilites, 
-            st.session_state.filieres,
-            st.session_state.co_jurys, 
-            params
+            st.session_state.etudiants, st.session_state.dates, st.session_state.nb_salles, st.session_state.duree, 
+            st.session_state.disponibilites, st.session_state.filieres, st.session_state.co_jurys, params
         )
         plan, fail, charges = eng.run_optimization()
         st.session_state.planning = plan; st.session_state.failed = fail; st.session_state.stats_charges = charges
@@ -507,12 +480,7 @@ elif st.session_state.etape == 5:
             st.dataframe(pd.DataFrame(data).sort_values("Enseignant"), use_container_width=True)
 
         excel_data = generate_excel_planning(st.session_state.planning, st.session_state.nb_salles)
-        st.download_button(
-            label="📥 Télécharger Planning Formaté (.xlsx)",
-            data=excel_data,
-            file_name="Planning_Soutenances.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        st.download_button("📥 Télécharger Planning (.xlsx)", excel_data, "Planning_Soutenances.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         df = pd.DataFrame(st.session_state.planning)
         tab1, tab2 = st.tabs(["Tableau", "Gantt"])
