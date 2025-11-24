@@ -11,7 +11,7 @@ import random
 import unicodedata
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Planification Soutenances v15 (Filières)", layout="wide", page_icon="🎓")
+st.set_page_config(page_title="Planification Soutenances v16 (Noms Excel)", layout="wide", page_icon="🎓")
 
 # --- STYLES ---
 st.markdown("""
@@ -30,6 +30,29 @@ DEFAULT_STATE = {
 for key, value in DEFAULT_STATE.items():
     if key not in st.session_state: st.session_state[key] = value
 
+# --- HELPER: Extraction Nom ---
+def extract_nom_only(fullname):
+    """
+    Tente d'extraire uniquement le nom de famille.
+    Logique : Cherche les parties en MAJUSCULES (standard académique).
+    Si 'DUPONT Jean' -> 'DUPONT'. Si 'Jean DUPONT' -> 'DUPONT'.
+    Fallback : Prend le premier mot.
+    """
+    if not isinstance(fullname, str) or not fullname:
+        return ""
+    
+    parts = fullname.strip().split()
+    # On garde les mots qui sont tout en majuscules (et plus d'une lettre pour éviter les initiales isolées type J.)
+    upper_parts = [p for p in parts if p.isupper() and len(p) > 1]
+    
+    # Cas particuliers (particules type DE, LE qui sont en majuscule)
+    # Si on a trouvé des majuscules, on les retourne
+    if upper_parts:
+        return " ".join(upper_parts)
+    
+    # Sinon, on retourne le premier mot (supposition format: Nom Prénom)
+    return parts[0] if parts else ""
+
 # --- EXPORT EXCEL AVANCE ---
 def generate_excel_planning(planning_data, nb_salles):
     """Génère un fichier Excel formaté selon la demande (Feuille/Jour, Colonne/Salle)."""
@@ -39,7 +62,7 @@ def generate_excel_planning(planning_data, nb_salles):
         
     df = pd.DataFrame(planning_data)
     
-    # Créneaux théoriques (pour afficher même les trous)
+    # Créneaux théoriques
     slots_matin = ["08:00", "08:50", "09:40", "10:30", "11:20", "12:10"]
     slots_aprem = ["14:00", "14:50", "15:40", "16:30", "17:20"]
     
@@ -60,7 +83,6 @@ def generate_excel_planning(planning_data, nb_salles):
             unique_days = sorted(df['Jour'].unique())
 
         for jour in unique_days:
-            # Nom de l'onglet (max 31 chars)
             sheet_name = re.sub(r'[\\/*?:\[\]]', "", str(jour))[:31]
             worksheet = workbook.add_worksheet(sheet_name)
             
@@ -92,7 +114,13 @@ def generate_excel_planning(planning_data, nb_salles):
                     if not match.empty:
                         data = match.iloc[0]
                         etu_txt = f"{data['Étudiant']} ({data['Pays']})" if data['Pays'] else data['Étudiant']
-                        jury_txt = f"{data['Tuteur'].split(' ')[0]} + {data['Co-jury'].split(' ')[0]}"
+                        
+                        # --- MODIFICATION ICI : Utilisation de extract_nom_only ---
+                        nom_tuteur = extract_nom_only(data['Tuteur'])
+                        nom_cojury = extract_nom_only(data['Co-jury'])
+                        jury_txt = f"{nom_tuteur} + {nom_cojury}"
+                        # ----------------------------------------------------------
+                        
                         worksheet.write(row_idx, col_offset + 1, etu_txt, fmt_cell)
                         worksheet.write(row_idx, col_offset + 2, jury_txt, fmt_cell)
                     else:
@@ -111,7 +139,13 @@ def generate_excel_planning(planning_data, nb_salles):
                     if not match.empty:
                         data = match.iloc[0]
                         etu_txt = f"{data['Étudiant']} ({data['Pays']})" if data['Pays'] else data['Étudiant']
-                        jury_txt = f"{data['Tuteur'].split(' ')[0]} + {data['Co-jury'].split(' ')[0]}"
+                        
+                        # --- MODIFICATION ICI ---
+                        nom_tuteur = extract_nom_only(data['Tuteur'])
+                        nom_cojury = extract_nom_only(data['Co-jury'])
+                        jury_txt = f"{nom_tuteur} + {nom_cojury}"
+                        # ------------------------
+                        
                         worksheet.write(row_idx, col_offset + 1, etu_txt, fmt_cell)
                         worksheet.write(row_idx, col_offset + 2, jury_txt, fmt_cell)
                     else:
@@ -187,7 +221,7 @@ def importer_etudiants(uploaded_file):
 
 def importer_disponibilites(uploaded_file, tuteurs_connus, co_jurys_connus, horaires_config):
     df, error = lire_fichier_robuste(uploaded_file)
-    if error: return [], [], [], [error] # Modifié pour retourner filieres
+    if error: return [], [], [], [error]
     
     personnes_reconnues = {p for p in (tuteurs_connus + co_jurys_connus) if p and str(p).lower() != 'nan'}
     
@@ -204,7 +238,7 @@ def importer_disponibilites(uploaded_file, tuteurs_connus, co_jurys_connus, hora
     
     if not date_cols_map: return {}, [], {}, ["Pas de colonnes dates valides."]
 
-    # --- MODIFICATION: Recherche de la colonne FILIERE ---
+    # Recherche de la colonne FILIERE
     col_filiere = None
     for c in df.columns:
         if "FILIERE" in str(c).upper() or "DEPARTEMENT" in str(c).upper():
@@ -227,13 +261,11 @@ def importer_disponibilites(uploaded_file, tuteurs_connus, co_jurys_connus, hora
             final_name = best_match
             if final_name not in dispos_data: dispos_data[final_name] = {}
             
-            # Extraction Filière
             if col_filiere:
                 filiere_val = clean_str(row.get(col_filiere, "")).upper()
                 if filiere_val:
                     filieres_data[final_name] = filiere_val
 
-            # Extraction Dates
             for col_csv, key_app in date_cols_map.items():
                 val = row.get(col_csv, 0)
                 try:
@@ -252,7 +284,7 @@ class SchedulerEngine:
         self.nb_salles = nb_salles
         self.duree = duree
         self.dispos = dispos
-        self.filieres = filieres # Stockage des filières
+        self.filieres = filieres
         self.dates = dates
         self.co_jurys_pool = list(set(co_jurys_pool))
         self.params = params
@@ -304,7 +336,6 @@ class SchedulerEngine:
         charge_t = defaultdict(int); charge_c = defaultdict(int)
         jury_times = defaultdict(set); jury_days = defaultdict(set)
         
-        # Tri aléatoire/pondéré des étudiants
         student_queue = []
         for etu in self.etudiants:
             tut = etu['Tuteur']
@@ -314,7 +345,7 @@ class SchedulerEngine:
         
         for _, etu in student_queue:
             tuteur = etu['Tuteur']
-            f_tut = self.filieres.get(tuteur) # Récupère la filière du tuteur
+            f_tut = self.filieres.get(tuteur)
             
             best_move = None; best_score = -float('inf')
             slots_shuffled = self.slots.copy(); random.shuffle(slots_shuffled)
@@ -338,12 +369,9 @@ class SchedulerEngine:
                 for cj in self.all_possible_jurys:
                     if cj == tuteur: continue
                     
-                    # --- CONTRAINTE FILIERE ---
                     f_cj = self.filieres.get(cj)
-                    # Si les deux ont une filière définie et qu'elles sont différentes => on saute
                     if f_tut and f_cj and f_tut != f_cj:
                         continue
-                    # --------------------------
 
                     if cj in busy_jurys[slot['key']]: continue
                     if not self.is_available(cj, slot['key']): continue
@@ -453,14 +481,13 @@ elif st.session_state.etape == 5:
     
     if st.button("Lancer", type="primary"):
         params = {"n_iterations": n_iter, "w_random": w_rand, "w_contiguity": w_cont, "w_balance": w_bal, "w_day": 100}
-        # Ajout de self.filieres lors de l'appel
         eng = SchedulerEngine(
             st.session_state.etudiants, 
             st.session_state.dates, 
             st.session_state.nb_salles, 
             st.session_state.duree, 
             st.session_state.disponibilites, 
-            st.session_state.filieres,  # <-- PASSAGE DES FILIERES
+            st.session_state.filieres,
             st.session_state.co_jurys, 
             params
         )
@@ -479,7 +506,6 @@ elif st.session_state.etape == 5:
                 data.append({"Enseignant": p, "Filière": fil, "Tuteur": c_t, "Co-Jury": c_c, "Delta": c_t-c_c})
             st.dataframe(pd.DataFrame(data).sort_values("Enseignant"), use_container_width=True)
 
-        # BOUTON EXPORT EXCEL FORMATE
         excel_data = generate_excel_planning(st.session_state.planning, st.session_state.nb_salles)
         st.download_button(
             label="📥 Télécharger Planning Formaté (.xlsx)",
