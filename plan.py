@@ -11,7 +11,7 @@ import random
 import unicodedata
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Planification Soutenances v18 (Salles & Filières)", layout="wide", page_icon="🎓")
+st.set_page_config(page_title="Planification Soutenances v19 (Parité Stricte)", layout="wide", page_icon="🎓")
 
 # --- STYLES ---
 st.markdown("""
@@ -233,8 +233,11 @@ class SchedulerEngine:
         self.dispos = dispos; self.filieres = filieres; self.dates = dates
         self.co_jurys_pool = list(set(co_jurys_pool)); self.params = params
         self.slots = self._generate_slots()
+        
+        # Cible : Nombre d'étudiants pour chaque tuteur
         self.target_cojury = defaultdict(int)
         for e in self.etudiants: self.target_cojury[e['Tuteur']] += 1
+        
         self.tuteurs_actifs = list(set(e['Tuteur'] for e in etudiants if e['Tuteur']))
         self.all_possible_jurys = list(set(self.co_jurys_pool + self.tuteurs_actifs))
 
@@ -265,12 +268,31 @@ class SchedulerEngine:
     def run_optimization(self):
         best_sol = None; best_score = (-1, float('inf'))
         prog = st.progress(0); status = st.empty()
-        for i in range(self.params['n_iterations']):
-            prog.progress((i+1)/self.params['n_iterations'])
+        
+        # Petit ajustement ici pour être sûr qu'on cherche vraiment
+        n_iters = self.params['n_iterations']
+        
+        for i in range(n_iters):
+            prog.progress((i+1)/n_iters)
             plan, fail, charges = self._solve_single_run()
-            nb = len(plan); imb = sum(abs(c['tuteur']-c['cojury']) for c in charges.values())
-            if nb > best_score[0]: best_score = (nb, imb); best_sol = (plan, fail, charges)
-            elif nb == best_score[0] and imb < best_score[1]: best_score = (nb, imb); best_sol = (plan, fail, charges)
+            
+            # Critère 1: Maximiser le nombre d'étudiants placés
+            nb_places = len(plan)
+            
+            # Critère 2: Minimiser le déséquilibre (bien que la contrainte dure devrait le mettre à 0)
+            # On garde ce calcul pour départager si jamais le système force une exception technique
+            imb = sum(abs(c['tuteur']-c['cojury']) for c in charges.values())
+            
+            # Si on place plus de monde, c'est mieux
+            if nb_places > best_score[0]: 
+                best_score = (nb_places, imb)
+                best_sol = (plan, fail, charges)
+            # A nombre égal, on cherche la meilleure répartition "interne" (moins de trous)
+            # Note: avec la contrainte stricte, imb devrait être très bas, on utilise imb comme 2eme critère
+            elif nb_places == best_score[0] and imb < best_score[1]: 
+                best_score = (nb_places, imb)
+                best_sol = (plan, fail, charges)
+                
         prog.empty(); status.empty()
         return best_sol
 
@@ -279,24 +301,26 @@ class SchedulerEngine:
         occupied_slots = set(); busy_jurys = defaultdict(set)
         charge_t = defaultdict(int); charge_c = defaultdict(int)
         jury_times = defaultdict(set); jury_days = defaultdict(set)
-        
-        # NOUVEAU: Suivi des salles par jury par jour (Clé: (nom, jour), Valeur: set(salles))
         jury_rooms = defaultdict(set)
         
         student_queue = []
         for etu in self.etudiants:
             tut = etu['Tuteur']
-            nb = sum(1 for v in self.dispos.get(tut, {}).values() if v) if tut in self.dispos else 100
-            student_queue.append((nb + random.uniform(0,2), etu))
+            # On trie pour placer les profs les moins disponibles en premier (heuristique)
+            nb_dispo = sum(1 for v in self.dispos.get(tut, {}).values() if v) if tut in self.dispos else 100
+            student_queue.append((nb_dispo + random.uniform(0,2), etu))
         student_queue.sort(key=lambda x: x[0])
         
         for _, etu in student_queue:
             tuteur = etu['Tuteur']
             f_tut = self.filieres.get(tuteur)
             best_move = None; best_score = -float('inf')
+            
+            # Randomisation pour explorer l'espace des solutions
             slots_shuffled = self.slots.copy(); random.shuffle(slots_shuffled)
             valid_slots = []
             
+            # Filtrage préalable des slots valides pour le tuteur
             for slot in slots_shuffled:
                 if slot['id'] in occupied_slots: continue
                 if tuteur in busy_jurys[slot['key']]: continue
@@ -310,19 +334,23 @@ class SchedulerEngine:
                 t_score = 0
                 t_prev = slot['start'] - timedelta(minutes=self.duree); t_next = slot['end']
                 
-                # Contiguïté (temps)
                 if t_prev in jury_times[tuteur]: t_score += self.params['w_contiguity']
                 if t_next in jury_times[tuteur]: t_score += self.params['w_contiguity']
                 if slot['jour'] in jury_days[tuteur]: t_score += self.params['w_day']
-                
-                # Stabilité Salle (Tuteur)
-                # Si le tuteur est déjà dans une salle ce jour-là, on privilégie cette salle
                 if (tuteur, slot['jour']) in jury_rooms:
                     if slot['salle'] in jury_rooms[(tuteur, slot['jour'])]:
                         t_score += self.params['w_room']
                 
                 for cj in self.all_possible_jurys:
                     if cj == tuteur: continue
+                    
+                    # --- MODIFICATION MAJEURE ICI : CONTRAINTE DURE (HARD LIMIT) ---
+                    # Si le co-jury a déjà atteint son quota (nb fois cojury >= nb étudiants suivis),
+                    # on ne permet PAS d'exception. On passe au suivant.
+                    if charge_c[cj] >= self.target_cojury[cj]:
+                        continue
+                    # -------------------------------------------------------------
+
                     f_cj = self.filieres.get(cj)
                     if f_tut and f_cj and f_tut != f_cj: continue # Contrainte Filiere
 
@@ -335,12 +363,14 @@ class SchedulerEngine:
                     if t_next in jury_times[cj]: cj_score += self.params['w_contiguity']
                     if slot['jour'] in jury_days[cj]: cj_score += self.params['w_day']
                     
-                    # Stabilité Salle (Co-jury)
                     if (cj, slot['jour']) in jury_rooms:
                         if slot['salle'] in jury_rooms[(cj, slot['jour'])]:
                             cj_score += self.params['w_room']
                     
+                    # Le bal_score est moins critique maintenant qu'on a une limite dure, 
+                    # mais il aide à prioriser ceux qui sont loin de leur quota.
                     bal_score = (self.target_cojury[cj] - charge_c[cj]) * self.params['w_balance']
+                    
                     total = t_score + cj_score + bal_score + random.uniform(0, self.params['w_random'])
                     if total > best_score: best_score = total; best_move = (slot, cj)
             
@@ -352,13 +382,19 @@ class SchedulerEngine:
                 for p in [tuteur, best_cj]: 
                     jury_times[p].add(slot['start'])
                     jury_days[p].add(slot['jour'])
-                    jury_rooms[(p, slot['jour'])].add(slot['salle']) # Enregistrement de la salle
+                    jury_rooms[(p, slot['jour'])].add(slot['salle'])
                 charge_t[tuteur] += 1; charge_c[best_cj] += 1
             else: unassigned.append(etu)
             
         final_charges = defaultdict(lambda: {'tuteur':0, 'cojury':0})
         for p,v in charge_t.items(): final_charges[p]['tuteur'] = v
         for p,v in charge_c.items(): final_charges[p]['cojury'] = v
+        # On s'assure d'inclure tout le monde même ceux à 0
+        all_ppl = set(charge_t.keys()) | set(charge_c.keys()) | set(self.target_cojury.keys())
+        for p in all_ppl:
+             # Juste pour être sûr que les clés existent
+             _ = final_charges[p]
+             
         return planning, unassigned, final_charges
 
 # --- UI ---
@@ -401,7 +437,9 @@ elif st.session_state.etape == 3:
         d_def = st.session_state.dates[i] if i < len(st.session_state.dates) else datetime(2026, 1, 26).date() + timedelta(days=i)
         ds.append(cols[i%4].date_input(f"Jour {i+1}", d_def))
     st.session_state.dates = ds
-    st.subheader("Co-jurys supplémentaires"); txt = st.text_input("Nom")
+    st.subheader("Co-jurys supplémentaires")
+    st.info("⚠️ Avec la règle de parité stricte, les co-jurys externes (sans étudiants) ne seront pas utilisés car leur quota est de 0.")
+    txt = st.text_input("Nom")
     if txt and txt not in st.session_state.co_jurys: st.session_state.co_jurys.append(txt)
     if st.session_state.co_jurys: st.write(st.session_state.co_jurys)
     if st.button("Suivant"): st.session_state.etape = 4; st.rerun()
@@ -447,14 +485,15 @@ elif st.session_state.etape == 5:
         w_rand = c2.slider("Exploration", 0, 500, 100)
         c3, c4 = st.columns(2)
         w_cont = c3.slider("Poids Contiguïté (Temps)", 0, 5000, 2000)
+        # w_bal n'est plus aussi crucial mais aide à guider
         w_bal = c4.slider("Poids Équilibre (Charge)", 0, 2000, 500)
         
-        # --- NOUVEAU CONTROLE ---
         st.divider()
-        w_room = st.slider("Poids Stabilité Salle (Ne pas changer de salle)", 0, 5000, 3000, help="Favorise fortement le fait de rester dans la même salle toute la journée.")
+        w_room = st.slider("Poids Stabilité Salle", 0, 5000, 3000)
     
+    st.warning("ℹ️ La règle de parité stricte (N Tuteur = N Co-jury) est active. Cela peut augmenter le nombre d'échecs si les disponibilités sont restreintes.")
+
     if st.button("Lancer", type="primary"):
-        # Ajout w_room aux params
         params = {
             "n_iterations": n_iter, "w_random": w_rand, 
             "w_contiguity": w_cont, "w_balance": w_bal, 
@@ -476,8 +515,16 @@ elif st.session_state.etape == 5:
             for p in all_p:
                 c_t = charges[p]['tuteur']; c_c = charges[p]['cojury']
                 fil = st.session_state.filieres.get(p, "-")
-                data.append({"Enseignant": p, "Filière": fil, "Tuteur": c_t, "Co-Jury": c_c, "Delta": c_t-c_c})
-            st.dataframe(pd.DataFrame(data).sort_values("Enseignant"), use_container_width=True)
+                # Delta doit être 0 pour respecter la consigne
+                data.append({"Enseignant": p, "Filière": fil, "Tuteur": c_t, "Co-Jury": c_c, "Delta (Doit être 0)": c_t-c_c})
+            
+            df_charges = pd.DataFrame(data).sort_values("Enseignant")
+            st.dataframe(df_charges, use_container_width=True)
+            
+            if df_charges['Delta (Doit être 0)'].abs().sum() > 0:
+                st.error("⚠️ Attention : La parité n'est pas respectée pour tout le monde (probablement dû aux étudiants non placés).")
+            else:
+                st.success("✅ Parité parfaite respectée.")
 
         excel_data = generate_excel_planning(st.session_state.planning, st.session_state.nb_salles)
         st.download_button("📥 Télécharger Planning (.xlsx)", excel_data, "Planning_Soutenances.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
