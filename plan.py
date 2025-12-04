@@ -13,7 +13,7 @@ import math
 import copy
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Planification Soutenances v21 (Recuit + Confort)", layout="wide", page_icon="🎓")
+st.set_page_config(page_title="Planification Soutenances v22 (Recuit + Confort Ajusté)", layout="wide", page_icon="🎓")
 
 # --- STYLES ---
 st.markdown("""
@@ -286,7 +286,7 @@ class AnnealingScheduler:
         return self.dispos[person].get(slot_key, False)
 
     def initial_solution_greedy(self):
-        """Construction rapide d'une solution valide (mais moche)"""
+        """Construction rapide d'une solution valide"""
         self.solution = []
         self.unassigned = []
         occupied = set()
@@ -302,7 +302,7 @@ class AnnealingScheduler:
             possibles = [sid for sid in self.tutor_valid_slots[tut] if sid not in occupied]
             
             if possibles:
-                # On prend le premier dispo (tendance à grouper chronologiquement si slots triés)
+                # On prend le premier dispo
                 sid = possibles[0] 
                 occupied.add(sid)
                 
@@ -334,7 +334,6 @@ class AnnealingScheduler:
         cost += len(self.unassigned) * 1_000_000
         
         # Structure de données pour analyse temporelle
-        # person_schedule[nom] = [(start_datetime, slot_id, salle)]
         person_schedule = defaultdict(list)
         
         # Compteurs pour parité
@@ -379,8 +378,7 @@ class AnnealingScheduler:
                 
         cost += phys_conflicts * 50_000
 
-        # 4. Confort (Trous & Salles) -> C'est ici que l'amélioration se joue
-        # On veut minimiser les trous et les changements de salle
+        # 4. Confort (Trous & Salles)
         
         for p, entries in person_schedule.items():
             if not entries: continue
@@ -396,27 +394,25 @@ class AnnealingScheduler:
                 
                 # --- A. PÉNALITÉ TROUS (GAPS) ---
                 if delta_min == 0:
-                    # Contigu : OK
-                    # --- B. PÉNALITÉ SALLE (ROOM SWAP) ---
-                    # Si c'est collé mais qu'on change de salle, c'est pénible
+                    # Contigu : OK, on vérifie juste la salle
                     if room1 != room2:
-                        cost += 500 # Pénalité changement salle
+                        cost += 100 # MODIFIÉ: Pénalité salle réduite (100)
                 
                 elif delta_min < 0:
-                    # Chevauchement (déjà puni par phys_conflicts, mais on rajoute pour guider)
+                    # Chevauchement (déjà puni par phys_conflicts)
                     cost += 1000
                 
                 else:
                     # Il y a un trou
                     if delta_min > 90: 
-                        # Grand trou (Pause déj ou trou matin/soir)
-                        # On tolère plus facilement, mais on préfère éviter si possible
-                        # ex: 8h-9h puis 16h-17h -> delta grand -> punition moyenne
-                        cost += 100 # Coût fixe pour "revenir plus tard"
+                        # Grand trou (>1h30)
+                        # Pour éviter de "préférer" un grand trou à plein de petits trous,
+                        # on garde un coût élevé fixe, mais inférieur à 100 * 90 (qui ferait 9000).
+                        # On met une pénalité fixe dissuasive pour les journées gruyère.
+                        cost += 2000 
                     else:
-                        # Petit trou (ex: 10h-11h, trou, 12h-13h)
-                        # C'est le plus chiant : attendre 1h pour rien
-                        cost += delta_min * 10 # 10 pts par minute d'attente
+                        # Petit trou : Puni très sévèrement par minute
+                        cost += delta_min * 100 # MODIFIÉ: 100 pts/min
         
         return cost
 
@@ -465,8 +461,6 @@ class AnnealingScheduler:
             elif move_type < 0.7:
                 all_valid = self.tutor_valid_slots[elem['tuteur']]
                 if all_valid:
-                    # On privilégie un slot qui est proche d'un autre slot du tuteur
-                    # (Heuristique locale pour accélérer la convergence)
                     new_slot = random.choice(all_valid)
                     candidate[idx_mod]['slot'] = new_slot
 
@@ -531,7 +525,7 @@ with st.sidebar:
     sel = st.radio("Aller à :", list(steps.keys()), format_func=lambda x: steps[x], index=st.session_state.etape -1)
     if sel != st.session_state.etape: st.session_state.etape = sel; st.rerun()
     st.divider()
-    st.info("Algorithme v3 : Parité Stricte + Compactage Temporel + Stabilité Salle")
+    st.info("Algorithme v3.1 : Parité Stricte + Compactage (100pts/min) + Salle souple")
 
 if st.session_state.etape == 1:
     st.title("1. Import des Étudiants")
@@ -587,8 +581,8 @@ elif st.session_state.etape == 5:
     st.write("Cet algorithme va chercher une solution qui minimise (dans l'ordre) :")
     st.write("1. Les étudiants non placés (Priorité absolue)")
     st.write("2. Les écarts de parité (Strict)")
-    st.write("3. Les trous dans l'emploi du temps (Confort)")
-    st.write("4. Les changements de salle intempestifs (Confort)")
+    st.write("3. Les trous dans l'emploi du temps (Confort Fort: 100pts/min)")
+    st.write("4. Les changements de salle intempestifs (Confort Faible: 100pts/swap)")
     
     n_iter = st.slider("Puissance de calcul (Temps vs Qualité)", 50, 500, 200)
     
