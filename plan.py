@@ -1,20 +1,3 @@
-C'est le défi classique de l'optimisation multi-objectifs. Vous avez une contrainte "dure" (la parité) qui réduit drastiquement les possibilités, et des contraintes "douces" (le confort : pas de trous, pas de changement de salle) qui guident vers la "belle" solution.
-
-Pour résoudre cela avec le Recuit Simulé, il faut **enrichir la fonction de coût (l'énergie)**.
-
-Voici les modifications conceptuelles apportées dans le code ci-dessous :
-
-1.  **Pénalité de "Trous" (Gaps) :** Pour chaque enseignant, on trie ses interventions par ordre chronologique. Si la fin d'une soutenance ne colle pas au début de la suivante (hors pause déjeuner), on ajoute une pénalité proportionnelle à la durée du trou.
-2.  **Pénalité de "Sauts de Salle" :** Si deux soutenances s'enchaînent temporellement mais changent de salle, on ajoute une pénalité.
-3.  **Pondération Hiérarchique :**
-    *   Niveau 1 (Critique) : Placer tout le monde ($10^6$ pts).
-    *   Niveau 2 (Strict) : Parité parfaite ($10^4$ pts).
-    *   Niveau 3 (Confort) : Pas de trous ($10$ pts/minute).
-    *   Niveau 4 (Confort) : Même salle ($500$ pts/changement).
-
-Voici le code complet mis à jour. L'optimisation prendra un peu plus de temps car elle calcule maintenant la "qualité" de l'emploi du temps de chaque prof à chaque étape.
-
-```python
 import streamlit as st
 import pandas as pd
 import plotly.express as px
