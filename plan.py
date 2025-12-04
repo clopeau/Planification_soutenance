@@ -11,7 +11,7 @@ import random
 import unicodedata
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Planification Soutenances (Visuel Pastel)", layout="wide", page_icon="🎓")
+st.set_page_config(page_title="Planification Soutenances (Anti-Isolés)", layout="wide", page_icon="🎓")
 
 # --- STYLES ---
 st.markdown("""
@@ -268,9 +268,34 @@ class SchedulerEngine:
     def is_available(self, person, slot_key):
         if person not in self.dispos: return True 
         return self.dispos[person].get(slot_key, False)
+        
+    def _count_orphans(self, planning):
+        """Compte le nombre de créneaux isolés (1 seul sur une 1/2 journée) pour tous les profs"""
+        # Clé = (Prof, Jour, AM/PM) -> Valeur = Count
+        counts = defaultdict(int)
+        for slot in planning:
+            # Récupérer l'info AM/PM
+            is_am = slot['Début'].hour < 13
+            hd_key = (slot['Jour'], 'AM' if is_am else 'PM')
+            
+            counts[(slot['Tuteur'], hd_key)] += 1
+            counts[(slot['Co-jury'], hd_key)] += 1
+            
+        # On compte combien de clés ont une valeur de 1
+        orphans = sum(1 for c in counts.values() if c == 1)
+        
+        # On peut aussi retourner le détail par prof pour l'affichage
+        orphans_by_prof = defaultdict(int)
+        for (prof, _), cnt in counts.items():
+            if cnt == 1: orphans_by_prof[prof] += 1
+            
+        return orphans, orphans_by_prof
 
     def run_optimization(self):
-        best_sol = None; best_score = (-1, float('inf'))
+        # Best Score format: (Nb Placés, -Nb Orphelins, -Déséquilibre)
+        # On veut Maximiser Placés, puis Minimiser Orphelins (donc Max -Orphelins), puis Minimiser Déséquilibre
+        best_sol = None; best_score = (-1, -float('inf'), -float('inf'))
+        
         prog = st.progress(0); status = st.empty()
         
         n_iters = self.params['n_iterations']
@@ -280,14 +305,18 @@ class SchedulerEngine:
             plan, fail, charges = self._solve_single_run()
             
             nb_places = len(plan)
+            
+            # Calcul des orphelins (singletons sur une demi-journée)
+            nb_orphans, orphans_details = self._count_orphans(plan)
+            
             imb = sum(abs(c['tuteur']-c['cojury']) for c in charges.values())
             
-            if nb_places > best_score[0]: 
-                best_score = (nb_places, imb)
-                best_sol = (plan, fail, charges)
-            elif nb_places == best_score[0] and imb < best_score[1]: 
-                best_score = (nb_places, imb)
-                best_sol = (plan, fail, charges)
+            current_score = (nb_places, -nb_orphans, -imb)
+            
+            if current_score > best_score: 
+                best_score = current_score
+                # On sauvegarde aussi le détail des orphelins pour l'affichage final
+                best_sol = (plan, fail, charges, orphans_details)
                 
         prog.empty(); status.empty()
         return best_sol
@@ -301,7 +330,6 @@ class SchedulerEngine:
         
         jury_halfday_counts = defaultdict(lambda: defaultdict(int))
         
-        # --- STRATEGIE DE TRI (PRIORITÉ) ---
         tutor_workload = defaultdict(int)
         for e in self.etudiants:
             tutor_workload[e['Tuteur']] += 1
@@ -312,9 +340,7 @@ class SchedulerEngine:
             nb_dispo = sum(1 for v in self.dispos.get(tut, {}).values() if v) if tut in self.dispos else 999
             nb_etu = tutor_workload[tut]
             
-            # SCORE DE PRIORITÉ : (Petit score = Haute priorité)
             priority_score = (nb_dispo * 1.5) + (nb_etu * 1.0) + random.uniform(0, 0.5)
-            
             student_queue.append((priority_score, etu))
             
         student_queue.sort(key=lambda x: x[0])
@@ -352,11 +378,12 @@ class SchedulerEngine:
                 # Regroupement Demi-journée (Min 2)
                 cnt_t = jury_halfday_counts[tuteur][hd_key]
                 if cnt_t == 1: 
-                    t_score += self.params['w_grouping'] * 2
+                    t_score += self.params['w_grouping'] * 2.5 # Bonus très fort pour faire la paire
                 elif cnt_t > 1:
                     t_score += self.params['w_grouping']
                 elif cnt_t == 0:
-                    t_score -= self.params['w_grouping'] * 0.5 
+                    # Pénalité plus forte pour éviter d'ouvrir une demi-journée isolée
+                    t_score -= self.params['w_grouping'] * 1.5 
 
                 for cj in self.all_possible_jurys:
                     if cj == tuteur: continue
@@ -381,11 +408,11 @@ class SchedulerEngine:
                             
                     cnt_c = jury_halfday_counts[cj][hd_key]
                     if cnt_c == 1:
-                        cj_score += self.params['w_grouping'] * 2
+                        cj_score += self.params['w_grouping'] * 2.5
                     elif cnt_c > 1:
                         cj_score += self.params['w_grouping']
                     elif cnt_c == 0:
-                        cj_score -= self.params['w_grouping'] * 0.5
+                        cj_score -= self.params['w_grouping'] * 1.5
                     
                     bal_score = (self.target_cojury[cj] - charge_c[cj]) * self.params['w_balance']
                     
@@ -530,10 +557,11 @@ elif st.session_state.etape == 5:
             st.session_state.etudiants, st.session_state.dates, st.session_state.nb_salles, st.session_state.duree, 
             st.session_state.disponibilites, st.session_state.filieres, st.session_state.co_jurys, params
         )
-        plan, fail, charges = eng.run_optimization()
+        plan, fail, charges, orphans = eng.run_optimization()
         st.session_state.planning = plan
         st.session_state.failed = fail
         st.session_state.stats_charges = charges
+        st.session_state.orphans_details = orphans
         
     if st.session_state.planning:
         st.divider()
@@ -545,9 +573,10 @@ elif st.session_state.etape == 5:
             c_stat2.success("Tous les étudiants sont placés !")
 
         if 'stats_charges' in st.session_state:
-            st.subheader("📊 Tableau de Contrôle (Bilan Tuteur / Co-jury)")
+            st.subheader("📊 Tableau de Contrôle")
             
             charges = st.session_state.stats_charges
+            orphans_map = st.session_state.orphans_details
             data_summary = []
             
             all_profs = set(charges.keys())
@@ -558,6 +587,7 @@ elif st.session_state.etape == 5:
                 if not p: continue
                 c_t = charges[p]['tuteur']
                 c_c = charges[p]['cojury']
+                c_orph = orphans_map.get(p, 0)
                 bilan = c_c - c_t
                 
                 if c_t > 0 or c_c > 0:
@@ -565,6 +595,7 @@ elif st.session_state.etape == 5:
                         "Tuteur": p,
                         "Jury (Tuteur)": c_t,
                         "Co-jury": c_c,
+                        "Orphelins (1 seul/Matinée)": c_orph,
                         "Bilan": bilan
                     })
             
@@ -576,16 +607,25 @@ elif st.session_state.etape == 5:
                 elif val < 0:
                     return 'background-color: #f8d7da; color: #721c24; font-weight: bold;'
                 return ''
+            
+            def color_orph(val):
+                if val > 0:
+                     return 'background-color: #fff3cd; color: #856404; font-weight: bold;'
+                return ''
 
             st.dataframe(
                 df_summary.style.map(color_bilan, subset=['Bilan'])
+                                .map(color_orph, subset=['Orphelins (1 seul/Matinée)'])
                                 .format({"Bilan": "{:+d}"}), 
                 use_container_width=True,
                 hide_index=True
             )
             
-            if not df_summary.empty and (df_summary['Bilan'] < 0).any():
-                st.warning("⚠️ Les lignes en rouge indiquent un enseignant qui n'a pas atteint son quota de co-jury.")
+            if not df_summary.empty:
+                if (df_summary['Bilan'] < 0).any():
+                    st.warning("⚠️ Les lignes Bilan rouges indiquent un manque de co-jury.")
+                if (df_summary['Orphelins (1 seul/Matinée)'] > 0).any():
+                    st.warning("⚠️ Les lignes Orphelins jaunes indiquent un enseignant qui vient pour une seule soutenance sur une demi-journée.")
 
         st.divider()
         excel_data = generate_excel_planning(st.session_state.planning, st.session_state.nb_salles)
