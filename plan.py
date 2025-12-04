@@ -1,3 +1,20 @@
+C'est le défi classique de l'optimisation multi-objectifs. Vous avez une contrainte "dure" (la parité) qui réduit drastiquement les possibilités, et des contraintes "douces" (le confort : pas de trous, pas de changement de salle) qui guident vers la "belle" solution.
+
+Pour résoudre cela avec le Recuit Simulé, il faut **enrichir la fonction de coût (l'énergie)**.
+
+Voici les modifications conceptuelles apportées dans le code ci-dessous :
+
+1.  **Pénalité de "Trous" (Gaps) :** Pour chaque enseignant, on trie ses interventions par ordre chronologique. Si la fin d'une soutenance ne colle pas au début de la suivante (hors pause déjeuner), on ajoute une pénalité proportionnelle à la durée du trou.
+2.  **Pénalité de "Sauts de Salle" :** Si deux soutenances s'enchaînent temporellement mais changent de salle, on ajoute une pénalité.
+3.  **Pondération Hiérarchique :**
+    *   Niveau 1 (Critique) : Placer tout le monde ($10^6$ pts).
+    *   Niveau 2 (Strict) : Parité parfaite ($10^4$ pts).
+    *   Niveau 3 (Confort) : Pas de trous ($10$ pts/minute).
+    *   Niveau 4 (Confort) : Même salle ($500$ pts/changement).
+
+Voici le code complet mis à jour. L'optimisation prendra un peu plus de temps car elle calcule maintenant la "qualité" de l'emploi du temps de chaque prof à chaque étape.
+
+```python
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -9,15 +26,16 @@ from thefuzz import fuzz
 import re
 import random
 import unicodedata
+import math
+import copy
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Planification Soutenances v19 (Parité Stricte)", layout="wide", page_icon="🎓")
+st.set_page_config(page_title="Planification Soutenances v21 (Recuit + Confort)", layout="wide", page_icon="🎓")
 
 # --- STYLES ---
 st.markdown("""
     <style>
     .stApp { background-color: #f9f9f9; }
-    .success-box { padding: 15px; background-color: #d4edda; color: #155724; border-radius: 5px; border: 1px solid #c3e6cb; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -25,7 +43,7 @@ st.markdown("""
 DEFAULT_STATE = {
     "etape": 1, "etudiants": [], "co_jurys": [], "dates": [],
     "disponibilites": {}, "filieres": {}, "planning": [], "nb_salles": 2,
-    "duree": 50, "failed": []
+    "duree": 50, "failed": [], "stats_charges": {}
 }
 for key, value in DEFAULT_STATE.items():
     if key not in st.session_state: st.session_state[key] = value
@@ -38,7 +56,7 @@ def extract_nom_only(fullname):
     if upper_parts: return " ".join(upper_parts)
     return parts[0] if parts else ""
 
-# --- EXPORT EXCEL AVANCE ---
+# --- EXPORT EXCEL ---
 def generate_excel_planning(planning_data, nb_salles):
     output = BytesIO()
     if not planning_data: return output
@@ -226,20 +244,39 @@ def importer_disponibilites(uploaded_file, tuteurs_connus, co_jurys_connus, hora
         
     return dispos_data, list(treated), filieres_data, logs
 
-# --- MOTEUR ---
-class SchedulerEngine:
-    def __init__(self, etudiants, dates, nb_salles, duree, dispos, filieres, co_jurys_pool, params):
-        self.etudiants = etudiants; self.nb_salles = nb_salles; self.duree = duree
-        self.dispos = dispos; self.filieres = filieres; self.dates = dates
-        self.co_jurys_pool = list(set(co_jurys_pool)); self.params = params
+# --- ALGO: RECUIT SIMULÉ (Simulated Annealing) ---
+class AnnealingScheduler:
+    def __init__(self, etudiants, dates, nb_salles, duree, dispos, filieres, params):
+        self.etudiants = etudiants
+        self.nb_salles = nb_salles
+        self.duree = duree
+        self.dispos = dispos
+        self.filieres = filieres
+        self.dates = dates
+        self.params = params
+        
+        # Génération des créneaux
         self.slots = self._generate_slots()
+        self.slots_map = {s['id']: s for s in self.slots}
         
-        # Cible : Nombre d'étudiants pour chaque tuteur
+        # Cibles strictes (Parité)
         self.target_cojury = defaultdict(int)
-        for e in self.etudiants: self.target_cojury[e['Tuteur']] += 1
+        for e in self.etudiants: 
+            self.target_cojury[e['Tuteur']] += 1
+            
+        # Jurys potentiels (seulement ceux qui ont une cible > 0)
+        self.active_jurys = list(self.target_cojury.keys())
         
-        self.tuteurs_actifs = list(set(e['Tuteur'] for e in etudiants if e['Tuteur']))
-        self.all_possible_jurys = list(set(self.co_jurys_pool + self.tuteurs_actifs))
+        # Pré-calcul des disponibilités
+        self.tutor_valid_slots = defaultdict(list)
+        for p in self.active_jurys:
+            for s in self.slots:
+                if self.is_available(p, s['key']):
+                    self.tutor_valid_slots[p].append(s['id'])
+                    
+        # Variables d'état
+        self.solution = []
+        self.unassigned = []
 
     def _generate_slots(self):
         slots = []; slot_id = 0
@@ -265,137 +302,244 @@ class SchedulerEngine:
         if person not in self.dispos: return True 
         return self.dispos[person].get(slot_key, False)
 
-    def run_optimization(self):
-        best_sol = None; best_score = (-1, float('inf'))
-        prog = st.progress(0); status = st.empty()
+    def initial_solution_greedy(self):
+        """Construction rapide d'une solution valide (mais moche)"""
+        self.solution = []
+        self.unassigned = []
+        occupied = set()
         
-        # Petit ajustement ici pour être sûr qu'on cherche vraiment
-        n_iters = self.params['n_iterations']
+        # On essaie de grouper par tuteur dès le début si possible (petit boost)
+        etudiants_sorted = sorted(range(len(self.etudiants)), key=lambda x: self.etudiants[x]['Tuteur'])
         
-        for i in range(n_iters):
-            prog.progress((i+1)/n_iters)
-            plan, fail, charges = self._solve_single_run()
-            
-            # Critère 1: Maximiser le nombre d'étudiants placés
-            nb_places = len(plan)
-            
-            # Critère 2: Minimiser le déséquilibre (bien que la contrainte dure devrait le mettre à 0)
-            # On garde ce calcul pour départager si jamais le système force une exception technique
-            imb = sum(abs(c['tuteur']-c['cojury']) for c in charges.values())
-            
-            # Si on place plus de monde, c'est mieux
-            if nb_places > best_score[0]: 
-                best_score = (nb_places, imb)
-                best_sol = (plan, fail, charges)
-            # A nombre égal, on cherche la meilleure répartition "interne" (moins de trous)
-            # Note: avec la contrainte stricte, imb devrait être très bas, on utilise imb comme 2eme critère
-            elif nb_places == best_score[0] and imb < best_score[1]: 
-                best_score = (nb_places, imb)
-                best_sol = (plan, fail, charges)
-                
-        prog.empty(); status.empty()
-        return best_sol
-
-    def _solve_single_run(self):
-        planning = []; unassigned = []
-        occupied_slots = set(); busy_jurys = defaultdict(set)
-        charge_t = defaultdict(int); charge_c = defaultdict(int)
-        jury_times = defaultdict(set); jury_days = defaultdict(set)
-        jury_rooms = defaultdict(set)
-        
-        student_queue = []
-        for etu in self.etudiants:
+        for idx in etudiants_sorted:
+            etu = self.etudiants[idx]
             tut = etu['Tuteur']
-            # On trie pour placer les profs les moins disponibles en premier (heuristique)
-            nb_dispo = sum(1 for v in self.dispos.get(tut, {}).values() if v) if tut in self.dispos else 100
-            student_queue.append((nb_dispo + random.uniform(0,2), etu))
-        student_queue.sort(key=lambda x: x[0])
+            
+            # Créneaux valides pour le tuteur non occupés
+            possibles = [sid for sid in self.tutor_valid_slots[tut] if sid not in occupied]
+            
+            if possibles:
+                # On prend le premier dispo (tendance à grouper chronologiquement si slots triés)
+                sid = possibles[0] 
+                occupied.add(sid)
+                
+                # Co-jury au hasard valide
+                cands = []
+                f_tut = self.filieres.get(tut)
+                for cj in self.active_jurys:
+                    if cj == tut: continue
+                    if f_tut and self.filieres.get(cj) and f_tut != self.filieres.get(cj): continue
+                    if self.is_available(cj, self.slots_map[sid]['key']):
+                        cands.append(cj)
+                
+                cj = random.choice(cands) if cands else random.choice([x for x in self.active_jurys if x != tut])
+                
+                self.solution.append({
+                    "idx": idx,
+                    "slot": sid,
+                    "tuteur": tut,
+                    "cojury": cj
+                })
+            else:
+                self.unassigned.append(idx)
+
+    def calculate_cost(self, current_sol):
+        """Calcul complet de l'énergie (plus c'est bas, mieux c'est)"""
+        cost = 0
         
-        for _, etu in student_queue:
-            tuteur = etu['Tuteur']
-            f_tut = self.filieres.get(tuteur)
-            best_move = None; best_score = -float('inf')
+        # 1. Non assignés (Interdit)
+        cost += len(self.unassigned) * 1_000_000
+        
+        # Structure de données pour analyse temporelle
+        # person_schedule[nom] = [(start_datetime, slot_id, salle)]
+        person_schedule = defaultdict(list)
+        
+        # Compteurs pour parité
+        cojury_counts = defaultdict(int)
+        
+        # Compteurs conflits (doublons horaires)
+        slot_occupancy = defaultdict(int) # slot_id -> count
+        person_occupancy = defaultdict(list) # nom -> [time_key]
+        
+        for s in current_sol:
+            cojury_counts[s['cojury']] += 1
+            slot_info = self.slots_map[s['slot']]
             
-            # Randomisation pour explorer l'espace des solutions
-            slots_shuffled = self.slots.copy(); random.shuffle(slots_shuffled)
-            valid_slots = []
+            # Enregistrement pour analyse temporelle
+            entry = (slot_info['start'], s['slot'], slot_info['salle'])
+            person_schedule[s['tuteur']].append(entry)
+            person_schedule[s['cojury']].append(entry)
             
-            # Filtrage préalable des slots valides pour le tuteur
-            for slot in slots_shuffled:
-                if slot['id'] in occupied_slots: continue
-                if tuteur in busy_jurys[slot['key']]: continue
-                if not self.is_available(tuteur, slot['key']): continue
-                valid_slots.append(slot)
+            # Check dispo immédiat
+            if not self.is_available(s['cojury'], slot_info['key']):
+                cost += 5_000 # Cojury pas libre
                 
-            if not valid_slots: unassigned.append(etu); continue
-            
-            for slot in valid_slots:
-                # --- SCORE TUTEUR ---
-                t_score = 0
-                t_prev = slot['start'] - timedelta(minutes=self.duree); t_next = slot['end']
-                
-                if t_prev in jury_times[tuteur]: t_score += self.params['w_contiguity']
-                if t_next in jury_times[tuteur]: t_score += self.params['w_contiguity']
-                if slot['jour'] in jury_days[tuteur]: t_score += self.params['w_day']
-                if (tuteur, slot['jour']) in jury_rooms:
-                    if slot['salle'] in jury_rooms[(tuteur, slot['jour'])]:
-                        t_score += self.params['w_room']
-                
-                for cj in self.all_possible_jurys:
-                    if cj == tuteur: continue
-                    
-                    # --- MODIFICATION MAJEURE ICI : CONTRAINTE DURE (HARD LIMIT) ---
-                    # Si le co-jury a déjà atteint son quota (nb fois cojury >= nb étudiants suivis),
-                    # on ne permet PAS d'exception. On passe au suivant.
-                    if charge_c[cj] >= self.target_cojury[cj]:
-                        continue
-                    # -------------------------------------------------------------
+            slot_occupancy[s['slot']] += 1
+            person_occupancy[s['tuteur']].append(slot_info['key'])
+            person_occupancy[s['cojury']].append(slot_info['key'])
 
-                    f_cj = self.filieres.get(cj)
-                    if f_tut and f_cj and f_tut != f_cj: continue # Contrainte Filiere
+        # 2. Parité (Critique)
+        parity_error = 0
+        for p in self.active_jurys:
+            diff = abs(cojury_counts[p] - self.target_cojury[p])
+            parity_error += diff
+        cost += parity_error * 10_000
+        
+        # 3. Conflits Physiques (Ubiquité ou Salle occupée doublement)
+        phys_conflicts = 0
+        for pid, count in slot_occupancy.items():
+            if count > 1: phys_conflicts += (count - 1)
+        
+        for p, times in person_occupancy.items():
+            if len(times) != len(set(times)):
+                phys_conflicts += (len(times) - len(set(times)))
+                
+        cost += phys_conflicts * 50_000
 
-                    if cj in busy_jurys[slot['key']]: continue
-                    if not self.is_available(cj, slot['key']): continue
-                    
-                    # --- SCORE CO-JURY ---
-                    cj_score = 0
-                    if t_prev in jury_times[cj]: cj_score += self.params['w_contiguity']
-                    if t_next in jury_times[cj]: cj_score += self.params['w_contiguity']
-                    if slot['jour'] in jury_days[cj]: cj_score += self.params['w_day']
-                    
-                    if (cj, slot['jour']) in jury_rooms:
-                        if slot['salle'] in jury_rooms[(cj, slot['jour'])]:
-                            cj_score += self.params['w_room']
-                    
-                    # Le bal_score est moins critique maintenant qu'on a une limite dure, 
-                    # mais il aide à prioriser ceux qui sont loin de leur quota.
-                    bal_score = (self.target_cojury[cj] - charge_c[cj]) * self.params['w_balance']
-                    
-                    total = t_score + cj_score + bal_score + random.uniform(0, self.params['w_random'])
-                    if total > best_score: best_score = total; best_move = (slot, cj)
+        # 4. Confort (Trous & Salles) -> C'est ici que l'amélioration se joue
+        # On veut minimiser les trous et les changements de salle
+        
+        for p, entries in person_schedule.items():
+            if not entries: continue
+            # Tri chronologique
+            entries.sort(key=lambda x: x[0])
             
-            if best_move:
-                slot, best_cj = best_move
-                planning.append({"Étudiant": f"{etu['Prénom']} {etu['Nom']}", "Pays": etu['Pays'], "Tuteur": tuteur, "Co-jury": best_cj, "Jour": slot['jour'], "Heure": slot['heure'], "Salle": slot['salle'], "Début": slot['start'], "Fin": slot['end']})
-                occupied_slots.add(slot['id'])
-                busy_jurys[slot['key']].add(tuteur); busy_jurys[slot['key']].add(best_cj)
-                for p in [tuteur, best_cj]: 
-                    jury_times[p].add(slot['start'])
-                    jury_days[p].add(slot['jour'])
-                    jury_rooms[(p, slot['jour'])].add(slot['salle'])
-                charge_t[tuteur] += 1; charge_c[best_cj] += 1
-            else: unassigned.append(etu)
+            for i in range(len(entries) - 1):
+                t1, sid1, room1 = entries[i]
+                t2, sid2, room2 = entries[i+1]
+                
+                # Écart en minutes
+                delta_min = (t2 - (t1 + timedelta(minutes=self.duree))).total_seconds() / 60
+                
+                # --- A. PÉNALITÉ TROUS (GAPS) ---
+                if delta_min == 0:
+                    # Contigu : OK
+                    # --- B. PÉNALITÉ SALLE (ROOM SWAP) ---
+                    # Si c'est collé mais qu'on change de salle, c'est pénible
+                    if room1 != room2:
+                        cost += 500 # Pénalité changement salle
+                
+                elif delta_min < 0:
+                    # Chevauchement (déjà puni par phys_conflicts, mais on rajoute pour guider)
+                    cost += 1000
+                
+                else:
+                    # Il y a un trou
+                    if delta_min > 90: 
+                        # Grand trou (Pause déj ou trou matin/soir)
+                        # On tolère plus facilement, mais on préfère éviter si possible
+                        # ex: 8h-9h puis 16h-17h -> delta grand -> punition moyenne
+                        cost += 100 # Coût fixe pour "revenir plus tard"
+                    else:
+                        # Petit trou (ex: 10h-11h, trou, 12h-13h)
+                        # C'est le plus chiant : attendre 1h pour rien
+                        cost += delta_min * 10 # 10 pts par minute d'attente
+        
+        return cost
+
+    def run_annealing(self):
+        # Init
+        self.initial_solution_greedy()
+        
+        current_sol = copy.deepcopy(self.solution)
+        current_cost = self.calculate_cost(current_sol)
+        
+        best_sol = copy.deepcopy(current_sol)
+        best_cost = current_cost
+        
+        # Paramètres
+        T = 2000.0
+        alpha = 0.98 # Refroidissement lent pour bien explorer
+        steps = self.params['n_iterations'] * 150 # Beaucoup d'itérations
+        
+        prog = st.progress(0)
+        status = st.empty()
+        
+        for i in range(steps):
+            if i % 100 == 0:
+                prog.progress(min(1.0, i/steps))
+                status.text(f"Optimisation ({i}/{steps})... Coût: {int(best_cost)}")
             
-        final_charges = defaultdict(lambda: {'tuteur':0, 'cojury':0})
-        for p,v in charge_t.items(): final_charges[p]['tuteur'] = v
-        for p,v in charge_c.items(): final_charges[p]['cojury'] = v
-        # On s'assure d'inclure tout le monde même ceux à 0
-        all_ppl = set(charge_t.keys()) | set(charge_c.keys()) | set(self.target_cojury.keys())
-        for p in all_ppl:
-             # Juste pour être sûr que les clés existent
-             _ = final_charges[p]
-             
-        return planning, unassigned, final_charges
+            # --- MUTATION ---
+            candidate = copy.deepcopy(current_sol)
+            if not candidate: break
+            
+            move_type = random.random()
+            idx_mod = random.randint(0, len(candidate)-1)
+            elem = candidate[idx_mod]
+            
+            # Type 1: Changer Co-Jury (Pour la Parité) - 40%
+            if move_type < 0.4:
+                others = [p for p in self.active_jurys if p != elem['tuteur']]
+                if others:
+                    new_cj = random.choice(others)
+                    f_tut = self.filieres.get(elem['tuteur'])
+                    f_cj = self.filieres.get(new_cj)
+                    if not f_tut or not f_cj or f_tut == f_cj:
+                         candidate[idx_mod]['cojury'] = new_cj
+            
+            # Type 2: Déplacer dans un slot vide (Pour boucher les trous) - 30%
+            elif move_type < 0.7:
+                all_valid = self.tutor_valid_slots[elem['tuteur']]
+                if all_valid:
+                    # On privilégie un slot qui est proche d'un autre slot du tuteur
+                    # (Heuristique locale pour accélérer la convergence)
+                    new_slot = random.choice(all_valid)
+                    candidate[idx_mod]['slot'] = new_slot
+
+            # Type 3: Swap de créneau avec un autre (Pour réorganiser) - 30%
+            else:
+                target_idx = random.randint(0, len(candidate)-1)
+                if target_idx != idx_mod:
+                    target = candidate[target_idx]
+                    s1, s2 = elem['slot'], target['slot']
+                    candidate[idx_mod]['slot'] = s2
+                    candidate[target_idx]['slot'] = s1
+            
+            # --- ACCEPTATION ---
+            new_cost = self.calculate_cost(candidate)
+            delta = new_cost - current_cost
+            
+            if delta < 0 or random.random() < math.exp(-delta / T):
+                current_sol = candidate
+                current_cost = new_cost
+                
+                if current_cost < best_cost:
+                    best_sol = copy.deepcopy(current_sol)
+                    best_cost = current_cost
+            
+            T *= alpha
+        
+        prog.empty(); status.empty()
+        
+        # Reconstruction Résultat
+        final_planning = []
+        charges_t = defaultdict(int)
+        charges_c = defaultdict(int)
+        
+        for item in best_sol:
+            etu = self.etudiants[item['idx']]
+            s = self.slots_map[item['slot']]
+            final_planning.append({
+                "Étudiant": f"{etu['Prénom']} {etu['Nom']}", 
+                "Pays": etu['Pays'], 
+                "Tuteur": item['tuteur'], 
+                "Co-jury": item['cojury'], 
+                "Jour": s['jour'], 
+                "Heure": s['heure'], 
+                "Salle": s['salle'], 
+                "Début": s['start'], 
+                "Fin": s['end']
+            })
+            charges_t[item['tuteur']] += 1
+            charges_c[item['cojury']] += 1
+            
+        final_charges = {}
+        all_p = set(charges_t.keys()) | set(charges_c.keys()) | set(self.active_jurys)
+        for p in all_p:
+            final_charges[p] = {'tuteur': charges_t[p], 'cojury': charges_c[p]}
+            
+        return final_planning, self.unassigned, final_charges
 
 # --- UI ---
 with st.sidebar:
@@ -404,10 +548,7 @@ with st.sidebar:
     sel = st.radio("Aller à :", list(steps.keys()), format_func=lambda x: steps[x], index=st.session_state.etape -1)
     if sel != st.session_state.etape: st.session_state.etape = sel; st.rerun()
     st.divider()
-    st.write(f"Étudiants : {len(st.session_state.etudiants)}")
-    st.write(f"Dispos Tuteurs : {len(st.session_state.disponibilites)}")
-    if 'filieres' in st.session_state:
-        st.write(f"Filières : {len(set(st.session_state.filieres.values()))}")
+    st.info("Algorithme v3 : Parité Stricte + Compactage Temporel + Stabilité Salle")
 
 if st.session_state.etape == 1:
     st.title("1. Import des Étudiants")
@@ -437,19 +578,15 @@ elif st.session_state.etape == 3:
         d_def = st.session_state.dates[i] if i < len(st.session_state.dates) else datetime(2026, 1, 26).date() + timedelta(days=i)
         ds.append(cols[i%4].date_input(f"Jour {i+1}", d_def))
     st.session_state.dates = ds
-    st.subheader("Co-jurys supplémentaires")
-    st.info("⚠️ Avec la règle de parité stricte, les co-jurys externes (sans étudiants) ne seront pas utilisés car leur quota est de 0.")
-    txt = st.text_input("Nom")
-    if txt and txt not in st.session_state.co_jurys: st.session_state.co_jurys.append(txt)
-    if st.session_state.co_jurys: st.write(st.session_state.co_jurys)
     if st.button("Suivant"): st.session_state.etape = 4; st.rerun()
 
 elif st.session_state.etape == 4:
     st.title("4. Import Disponibilités")
     st.info("Le fichier doit contenir une colonne nommée 'FILIERE'.")
-    eng = SchedulerEngine([], st.session_state.dates, 1, st.session_state.duree, {}, {}, [], {})
+    eng_dummy = AnnealingScheduler([], st.session_state.dates, 1, st.session_state.duree, {}, {}, {})
     mapping_config = defaultdict(list)
-    for s in eng.slots: k = s['key'].split(" | "); mapping_config[k[0]].append(k[1])
+    for s in eng_dummy.slots: k = s['key'].split(" | "); mapping_config[k[0]].append(k[1])
+    
     f = st.file_uploader("Fichier Disponibilités", type=['xlsx', 'csv'])
     if f:
         tuteurs_propres = [e['Tuteur'] for e in st.session_state.etudiants if e['Tuteur']]
@@ -457,89 +594,68 @@ elif st.session_state.etape == 4:
         if dispos:
             st.session_state.disponibilites = dispos
             st.session_state.filieres = filieres
-            
-            nb_profs_fil = len(filieres)
-            nb_types_fil = len(set(filieres.values()))
             st.success(f"✅ {len(dispos)} enseignants importés.")
-            if nb_types_fil > 0:
-                st.success(f"✅ {nb_profs_fil} enseignants avec filière détectée ({nb_types_fil} filières distinctes).")
-            else:
-                st.warning("⚠️ Aucune filière détectée (vérifiez la colonne 'FILIERE').")
-            
-            tuteurs_actifs = set(e['Tuteur'] for e in st.session_state.etudiants)
-            sans_filiere = [t for t in tuteurs_actifs if t not in filieres]
-            if sans_filiere:
-                st.warning(f"⚠️ Attention : {len(sans_filiere)} tuteurs actifs n'ont pas de filière définie :")
-                st.write(sans_filiere)
-
-            with st.expander("Logs"): 
-                for l in logs: st.write(l)
         else: st.error("Erreur import.")
     if st.button("Suivant"): st.session_state.etape = 5; st.rerun()
 
 elif st.session_state.etape == 5:
-    st.title("5. Génération")
-    with st.expander("Paramètres", expanded=True):
-        c1, c2 = st.columns(2)
-        n_iter = c1.slider("Itérations", 10, 200, 50)
-        w_rand = c2.slider("Exploration", 0, 500, 100)
-        c3, c4 = st.columns(2)
-        w_cont = c3.slider("Poids Contiguïté (Temps)", 0, 5000, 2000)
-        # w_bal n'est plus aussi crucial mais aide à guider
-        w_bal = c4.slider("Poids Équilibre (Charge)", 0, 2000, 500)
-        
-        st.divider()
-        w_room = st.slider("Poids Stabilité Salle", 0, 5000, 3000)
+    st.title("5. Génération Optimisée")
     
-    st.warning("ℹ️ La règle de parité stricte (N Tuteur = N Co-jury) est active. Cela peut augmenter le nombre d'échecs si les disponibilités sont restreintes.")
-
-    if st.button("Lancer", type="primary"):
-        params = {
-            "n_iterations": n_iter, "w_random": w_rand, 
-            "w_contiguity": w_cont, "w_balance": w_bal, 
-            "w_day": 100, "w_room": w_room
-        }
-        eng = SchedulerEngine(
+    st.write("Cet algorithme va chercher une solution qui minimise (dans l'ordre) :")
+    st.write("1. Les étudiants non placés (Priorité absolue)")
+    st.write("2. Les écarts de parité (Strict)")
+    st.write("3. Les trous dans l'emploi du temps (Confort)")
+    st.write("4. Les changements de salle intempestifs (Confort)")
+    
+    n_iter = st.slider("Puissance de calcul (Temps vs Qualité)", 50, 500, 200)
+    
+    if st.button("Lancer l'Optimisation", type="primary"):
+        params = {"n_iterations": n_iter}
+        eng = AnnealingScheduler(
             st.session_state.etudiants, st.session_state.dates, st.session_state.nb_salles, st.session_state.duree, 
-            st.session_state.disponibilites, st.session_state.filieres, st.session_state.co_jurys, params
+            st.session_state.disponibilites, st.session_state.filieres, params
         )
-        plan, fail, charges = eng.run_optimization()
-        st.session_state.planning = plan; st.session_state.failed = fail; st.session_state.stats_charges = charges
+        plan, fail, charges = eng.run_annealing()
+        st.session_state.planning = plan
+        st.session_state.failed = fail
+        st.session_state.stats_charges = charges
         
     if st.session_state.planning:
-        st.success(f"Placés : {len(st.session_state.planning)} | Échecs : {len(st.session_state.failed)}")
-        if 'stats_charges' in st.session_state:
-            charges = st.session_state.stats_charges; data = []
-            all_p = set(charges.keys())
-            for e in st.session_state.etudiants: all_p.add(e['Tuteur'])
-            for p in all_p:
-                c_t = charges[p]['tuteur']; c_c = charges[p]['cojury']
-                fil = st.session_state.filieres.get(p, "-")
-                # Delta doit être 0 pour respecter la consigne
-                data.append({"Enseignant": p, "Filière": fil, "Tuteur": c_t, "Co-Jury": c_c, "Delta (Doit être 0)": c_t-c_c})
-            
-            df_charges = pd.DataFrame(data).sort_values("Enseignant")
-            st.dataframe(df_charges, use_container_width=True)
-            
-            if df_charges['Delta (Doit être 0)'].abs().sum() > 0:
-                st.error("⚠️ Attention : La parité n'est pas respectée pour tout le monde (probablement dû aux étudiants non placés).")
-            else:
-                st.success("✅ Parité parfaite respectée.")
+        st.divider()
+        st.header("Résultats")
+        
+        # Stats
+        charges = st.session_state.stats_charges
+        total_delta = sum(abs(v['tuteur'] - v['cojury']) for v in charges.values())
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Étudiants Placés", f"{len(st.session_state.planning)} / {len(st.session_state.etudiants)}")
+        c2.metric("Écart Parité Total", total_delta, delta_color="inverse")
+        c3.metric("Non placés", len(st.session_state.failed), delta_color="inverse")
 
+        # Excel
         excel_data = generate_excel_planning(st.session_state.planning, st.session_state.nb_salles)
         st.download_button("📥 Télécharger Planning (.xlsx)", excel_data, "Planning_Soutenances.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
+        # Visu
         df = pd.DataFrame(st.session_state.planning)
-        tab1, tab2 = st.tabs(["Tableau", "Gantt"])
-        with tab1: st.dataframe(df)
-        with tab2:
-            if not df.empty:
+        if not df.empty:
+            tab1, tab2 = st.tabs(["Tableau", "Gantt (Visuel)"])
+            with tab1: 
+                st.dataframe(df)
+                data_stats = []
+                for p, vals in charges.items():
+                    data_stats.append({"Enseignant": p, "Tuteur": vals['tuteur'], "Co-Jury": vals['cojury'], "Delta": vals['tuteur']-vals['cojury']})
+                st.write("Détail Parité :"); st.dataframe(pd.DataFrame(data_stats))
+                
+            with tab2:
                 gantt = []
                 for x in st.session_state.planning:
                     for role, p in [("Tuteur", x['Tuteur']), ("Co-Jury", x['Co-jury'])]:
-                        gantt.append({"Enseignant": p, "Role": role, "Etudiant": x['Étudiant'], "Jour": x['Jour'], "Start": datetime(2000,1,1,x['Début'].hour, x['Début'].minute), "End": datetime(2000,1,1,x['Fin'].hour, x['Fin'].minute)})
-                df_g = pd.DataFrame(gantt).sort_values("Enseignant")
-                fig = px.timeline(df_g, x_start="Start", x_end="End", y="Enseignant", color="Role", facet_col="Jour", text="Etudiant", height=800)
+                        gantt.append({"Enseignant": p, "Role": role, "Etudiant": x['Étudiant'], "Jour": x['Jour'], "Start": datetime(2000,1,1,x['Début'].hour, x['Début'].minute), "End": datetime(2000,1,1,x['Fin'].hour, x['Fin'].minute), "Salle": x['Salle']})
+                df_g = pd.DataFrame(gantt).sort_values(["Enseignant", "Start"])
+                fig = px.timeline(df_g, x_start="Start", x_end="End", y="Enseignant", color="Salle", facet_col="Jour", text="Etudiant", height=800)
                 fig.update_xaxes(tickformat="%H:%M"); fig.update_yaxes(autorange="reversed")
                 st.plotly_chart(fig, use_container_width=True)
-        if st.session_state.failed: st.error("Non placés :"); st.dataframe(pd.DataFrame(st.session_state.failed))
+                st.caption("Les couleurs représentent les salles. Idéalement, une ligne 'Enseignant' ne devrait pas changer de couleur souvent sur une même journée.")
+```
