@@ -11,7 +11,7 @@ import random
 import unicodedata
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Planification Soutenances (Visuel Avancé)", layout="wide", page_icon="🎓")
+st.set_page_config(page_title="Planification Soutenances (Visuel Pastel)", layout="wide", page_icon="🎓")
 
 # --- STYLES ---
 st.markdown("""
@@ -606,7 +606,6 @@ elif st.session_state.etape == 5:
                 
                 # 2. Ajouter les barres rouges d'indisponibilités
                 if st.session_state.disponibilites:
-                    # Reconstruction rapide des slots théoriques pour vérifier chaque prof
                     slots_ref = []
                     for d in st.session_state.dates:
                         d_str = d.strftime("%A %d/%m/%Y")
@@ -627,18 +626,16 @@ elif st.session_state.etape == 5:
                                     curr = fin
                             except: continue
                     
-                    # On parcourt tous les profs actifs
                     all_p_gantt = set(x['Enseignant'] for x in df_g)
                     for p in all_p_gantt:
                         if p in st.session_state.disponibilites:
                             p_dispos = st.session_state.disponibilites[p]
                             for s in slots_ref:
-                                # Si explicitement marqué False dans le fichier importé
                                 if s['key'] in p_dispos and not p_dispos[s['key']]:
                                     df_g.append({
                                         "Enseignant": p,
                                         "Role": "Indisponible",
-                                        "Etudiant": "N/A", # Pas d'info bulle pertinente
+                                        "Etudiant": "N/A", 
                                         "Jour": s['jour'],
                                         "Start": s['start'],
                                         "End": s['end']
@@ -646,13 +643,16 @@ elif st.session_state.etape == 5:
 
                 df_viz = pd.DataFrame(df_g).sort_values("Enseignant")
                 
-                # Création du graphique
-                # text=None pour ne pas avoir le nom sur la barre
                 fig = px.timeline(df_viz, x_start="Start", x_end="End", y="Enseignant", color="Role", 
                                   facet_col="Jour", 
                                   hover_data={"Etudiant": True, "Role": True},
                                   height=max(400, len(all_p_gantt)*35), 
-                                  color_discrete_map={"Tuteur": "#2E86C1", "Co-jury": "#28B463", "Indisponible": "#E74C3C"})
+                                  # Utilisation de RGBA pour la transparence sur "Indisponible"
+                                  color_discrete_map={
+                                      "Tuteur": "#2E86C1", 
+                                      "Co-jury": "#28B463", 
+                                      "Indisponible": "rgba(255, 0, 0, 0.15)"
+                                  })
                 
                 fig.update_xaxes(tickformat="%H:%M")
                 fig.update_yaxes(autorange="reversed")
