@@ -11,7 +11,7 @@ import random
 import unicodedata
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Planification Soutenances (Parité Stricte)", layout="wide", page_icon="🎓")
+st.set_page_config(page_title="Planification Soutenances (Optimisée)", layout="wide", page_icon="🎓")
 
 # --- STYLES ---
 st.markdown("""
@@ -34,7 +34,6 @@ for key, value in DEFAULT_STATE.items():
 def extract_nom_only(fullname):
     if not isinstance(fullname, str) or not fullname: return ""
     parts = fullname.strip().split()
-    # Essaie de trouver les parties en MAJUSCULES (nom de famille souvent)
     upper_parts = [p for p in parts if p.isupper() and len(p) > 1]
     if upper_parts: return " ".join(upper_parts)
     return parts[0] if parts else ""
@@ -257,7 +256,13 @@ class SchedulerEngine:
                         h_str = f"{curr.strftime('%H:%M')} - {fin.strftime('%H:%M')}"
                         key = f"{d_str} | {h_str}"
                         for s in range(1, self.nb_salles + 1):
-                            slots.append({"id": slot_id, "key": key, "jour": d_str, "heure": h_str, "salle": f"Salle {s}", "start": curr, "end": fin})
+                            # On ajoute un marqueur AM/PM pour le regroupement
+                            is_am = curr.hour < 13
+                            slots.append({
+                                "id": slot_id, "key": key, "jour": d_str, "heure": h_str, 
+                                "salle": f"Salle {s}", "start": curr, "end": fin,
+                                "half_day_key": (d_str, 'AM' if is_am else 'PM')
+                            })
                             slot_id += 1
                         curr = fin
                 except: continue
@@ -279,7 +284,6 @@ class SchedulerEngine:
             
             # Critère 1: Maximiser le nombre d'étudiants placés
             nb_places = len(plan)
-            
             # Critère 2: Minimiser le déséquilibre total (somme des écarts absolus)
             imb = sum(abs(c['tuteur']-c['cojury']) for c in charges.values())
             
@@ -299,6 +303,10 @@ class SchedulerEngine:
         charge_t = defaultdict(int); charge_c = defaultdict(int)
         jury_times = defaultdict(set); jury_days = defaultdict(set)
         jury_rooms = defaultdict(set)
+        
+        # Suivi du nombre de créneaux par demi-journée pour chaque prof
+        # Structure: {'ProfA': {('Lundi 10...', 'AM'): 2}}
+        jury_halfday_counts = defaultdict(lambda: defaultdict(int))
         
         student_queue = []
         for etu in self.etudiants:
@@ -324,6 +332,8 @@ class SchedulerEngine:
             if not valid_slots: unassigned.append(etu); continue
             
             for slot in valid_slots:
+                hd_key = slot['half_day_key']
+                
                 # --- SCORE TUTEUR ---
                 t_score = 0
                 t_prev = slot['start'] - timedelta(minutes=self.duree); t_next = slot['end']
@@ -335,17 +345,28 @@ class SchedulerEngine:
                     if slot['salle'] in jury_rooms[(tuteur, slot['jour'])]:
                         t_score += self.params['w_room']
                 
+                # NOUVEAU: Logique de regroupement demi-journée (Min 2)
+                cnt_t = jury_halfday_counts[tuteur][hd_key]
+                if cnt_t == 1: 
+                    # Il en a 1, si on ajoute celui-là ça fait 2 -> EXCELLENT
+                    t_score += self.params['w_grouping'] * 2
+                elif cnt_t > 1:
+                    # Il en a déjà 2+, on continue de grouper -> BON
+                    t_score += self.params['w_grouping']
+                elif cnt_t == 0:
+                    # Il en a 0, on ouvre une nouvelle demi-journée -> PÉNALITÉ (pour forcer à chercher ailleurs d'abord)
+                    # Mais pas trop forte pour ne pas bloquer si c'est la seule option
+                    t_score -= self.params['w_grouping'] * 0.5
+
                 for cj in self.all_possible_jurys:
                     if cj == tuteur: continue
                     
                     # --- CONTRAINTE DURE : PARITÉ ---
-                    # Si le co-jury a déjà atteint son quota (nb fois cojury >= nb étudiants suivis),
-                    # on ne le prend pas, sauf si c'est un externe pur (mais ici on veut égalité).
                     if charge_c[cj] >= self.target_cojury[cj]:
                         continue
 
                     f_cj = self.filieres.get(cj)
-                    if f_tut and f_cj and f_tut != f_cj: continue # Contrainte Filière
+                    if f_tut and f_cj and f_tut != f_cj: continue 
 
                     if cj in busy_jurys[slot['key']]: continue
                     if not self.is_available(cj, slot['key']): continue
@@ -359,8 +380,16 @@ class SchedulerEngine:
                     if (cj, slot['jour']) in jury_rooms:
                         if slot['salle'] in jury_rooms[(cj, slot['jour'])]:
                             cj_score += self.params['w_room']
+                            
+                    # NOUVEAU: Logique de regroupement pour le Co-Jury aussi
+                    cnt_c = jury_halfday_counts[cj][hd_key]
+                    if cnt_c == 1:
+                        cj_score += self.params['w_grouping'] * 2
+                    elif cnt_c > 1:
+                        cj_score += self.params['w_grouping']
+                    elif cnt_c == 0:
+                        cj_score -= self.params['w_grouping'] * 0.5
                     
-                    # Favoriser ceux qui sont loin de leur quota
                     bal_score = (self.target_cojury[cj] - charge_c[cj]) * self.params['w_balance']
                     
                     total = t_score + cj_score + bal_score + random.uniform(0, self.params['w_random'])
@@ -371,6 +400,12 @@ class SchedulerEngine:
                 planning.append({"Étudiant": f"{etu['Prénom']} {etu['Nom']}", "Pays": etu['Pays'], "Tuteur": tuteur, "Co-jury": best_cj, "Jour": slot['jour'], "Heure": slot['heure'], "Salle": slot['salle'], "Début": slot['start'], "Fin": slot['end']})
                 occupied_slots.add(slot['id'])
                 busy_jurys[slot['key']].add(tuteur); busy_jurys[slot['key']].add(best_cj)
+                
+                # Mise à jour des compteurs demi-journée
+                hd_k = slot['half_day_key']
+                jury_halfday_counts[tuteur][hd_k] += 1
+                jury_halfday_counts[best_cj][hd_k] += 1
+                
                 for p in [tuteur, best_cj]: 
                     jury_times[p].add(slot['start'])
                     jury_days[p].add(slot['jour'])
@@ -379,7 +414,6 @@ class SchedulerEngine:
             else: unassigned.append(etu)
             
         final_charges = defaultdict(lambda: {'tuteur':0, 'cojury':0})
-        # Pour être sûr que tous les tuteurs apparaissent dans les stats
         all_people = set(self.target_cojury.keys()) | set(charge_t.keys()) | set(charge_c.keys())
         for p in all_people:
              final_charges[p]['tuteur'] = charge_t[p]
@@ -481,9 +515,12 @@ elif st.session_state.etape == 5:
         n_iter = c1.slider("Itérations", 10, 200, 50)
         w_rand = c2.slider("Exploration (Aléatoire)", 0, 500, 100)
         c3, c4 = st.columns(2)
-        w_cont = c3.slider("Poids Contiguïté", 0, 5000, 2000)
-        w_bal = c4.slider("Poids Équilibre", 0, 2000, 500)
-        w_room = st.slider("Poids Stabilité Salle", 0, 5000, 3000)
+        w_cont = c3.slider("Poids Contiguïté (Slots collés)", 0, 5000, 2000)
+        w_group = c4.slider("Poids Regroupement (Min 2/demi-journée)", 0, 5000, 3000) # Augmenté par défaut
+        
+        c5, c6 = st.columns(2)
+        w_bal = c5.slider("Poids Équilibre", 0, 2000, 500)
+        w_room = c6.slider("Poids Stabilité Salle", 0, 5000, 3000)
     
     st.info("ℹ️ Règle active : Un tuteur doit être co-jury autant de fois qu'il est tuteur (Bilan = 0).")
 
@@ -491,7 +528,8 @@ elif st.session_state.etape == 5:
         params = {
             "n_iterations": n_iter, "w_random": w_rand, 
             "w_contiguity": w_cont, "w_balance": w_bal, 
-            "w_day": 100, "w_room": w_room
+            "w_day": 100, "w_room": w_room,
+            "w_grouping": w_group
         }
         eng = SchedulerEngine(
             st.session_state.etudiants, st.session_state.dates, st.session_state.nb_salles, st.session_state.duree, 
@@ -528,7 +566,6 @@ elif st.session_state.etape == 5:
                 c_c = charges[p]['cojury']
                 
                 # Calcul du Bilan : Cojury - Tuteur
-                # Si Tuteur = 5 et Cojury = 4, alors 4 - 5 = -1 (Manque 1)
                 bilan = c_c - c_t
                 
                 if c_t > 0 or c_c > 0:
