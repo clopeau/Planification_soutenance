@@ -641,4 +641,3 @@ elif st.session_state.etape == 5:
                 fig.update_xaxes(tickformat="%H:%M"); fig.update_yaxes(autorange="reversed")
                 st.plotly_chart(fig, use_container_width=True)
                 st.caption("Les couleurs représentent les salles. Idéalement, une ligne 'Enseignant' ne devrait pas changer de couleur souvent sur une même journée.")
-```
