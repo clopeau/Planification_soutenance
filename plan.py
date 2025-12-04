@@ -11,7 +11,7 @@ import random
 import unicodedata
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Planification Soutenances (Optimisée)", layout="wide", page_icon="🎓")
+st.set_page_config(page_title="Planification Soutenances (Stratégie Condensation)", layout="wide", page_icon="🎓")
 
 # --- STYLES ---
 st.markdown("""
@@ -239,7 +239,6 @@ class SchedulerEngine:
         for e in self.etudiants: self.target_cojury[e['Tuteur']] += 1
         
         self.tuteurs_actifs = list(set(e['Tuteur'] for e in etudiants if e['Tuteur']))
-        # Pour la parité stricte, le pool de jurys est essentiellement les tuteurs actifs
         self.all_possible_jurys = list(set(self.co_jurys_pool + self.tuteurs_actifs))
 
     def _generate_slots(self):
@@ -256,7 +255,6 @@ class SchedulerEngine:
                         h_str = f"{curr.strftime('%H:%M')} - {fin.strftime('%H:%M')}"
                         key = f"{d_str} | {h_str}"
                         for s in range(1, self.nb_salles + 1):
-                            # On ajoute un marqueur AM/PM pour le regroupement
                             is_am = curr.hour < 13
                             slots.append({
                                 "id": slot_id, "key": key, "jour": d_str, "heure": h_str, 
@@ -282,9 +280,7 @@ class SchedulerEngine:
             prog.progress((i+1)/n_iters)
             plan, fail, charges = self._solve_single_run()
             
-            # Critère 1: Maximiser le nombre d'étudiants placés
             nb_places = len(plan)
-            # Critère 2: Minimiser le déséquilibre total (somme des écarts absolus)
             imb = sum(abs(c['tuteur']-c['cojury']) for c in charges.values())
             
             if nb_places > best_score[0]: 
@@ -304,15 +300,30 @@ class SchedulerEngine:
         jury_times = defaultdict(set); jury_days = defaultdict(set)
         jury_rooms = defaultdict(set)
         
-        # Suivi du nombre de créneaux par demi-journée pour chaque prof
-        # Structure: {'ProfA': {('Lundi 10...', 'AM'): 2}}
         jury_halfday_counts = defaultdict(lambda: defaultdict(int))
         
+        # --- STRATEGIE DE TRI (PRIORITÉ) ---
+        # 1. Calculer la charge de travail (Nombre d'étudiants) par prof
+        tutor_workload = defaultdict(int)
+        for e in self.etudiants:
+            tutor_workload[e['Tuteur']] += 1
+            
         student_queue = []
         for etu in self.etudiants:
             tut = etu['Tuteur']
-            nb_dispo = sum(1 for v in self.dispos.get(tut, {}).values() if v) if tut in self.dispos else 100
-            student_queue.append((nb_dispo + random.uniform(0,2), etu))
+            # Nombre de dispos (si inconnu, on met 999 pour dire "très flexible, à traiter en dernier")
+            nb_dispo = sum(1 for v in self.dispos.get(tut, {}).values() if v) if tut in self.dispos else 999
+            nb_etu = tutor_workload[tut]
+            
+            # SCORE DE PRIORITÉ : (Petit score = Haute priorité)
+            # On veut traiter en premier ceux qui ont :
+            # 1. Peu de disponibilités (nb_dispo faible)
+            # 2. Peu d'étudiants (nb_etu faible) => pour les regrouper tout de suite
+            priority_score = (nb_dispo * 1.5) + (nb_etu * 1.0) + random.uniform(0, 0.5)
+            
+            student_queue.append((priority_score, etu))
+            
+        # Tri Ascendant (Les plus contraints/petits en premier)
         student_queue.sort(key=lambda x: x[0])
         
         for _, etu in student_queue:
@@ -345,25 +356,19 @@ class SchedulerEngine:
                     if slot['salle'] in jury_rooms[(tuteur, slot['jour'])]:
                         t_score += self.params['w_room']
                 
-                # NOUVEAU: Logique de regroupement demi-journée (Min 2)
+                # Regroupement Demi-journée (Min 2)
                 cnt_t = jury_halfday_counts[tuteur][hd_key]
                 if cnt_t == 1: 
-                    # Il en a 1, si on ajoute celui-là ça fait 2 -> EXCELLENT
                     t_score += self.params['w_grouping'] * 2
                 elif cnt_t > 1:
-                    # Il en a déjà 2+, on continue de grouper -> BON
                     t_score += self.params['w_grouping']
                 elif cnt_t == 0:
-                    # Il en a 0, on ouvre une nouvelle demi-journée -> PÉNALITÉ (pour forcer à chercher ailleurs d'abord)
-                    # Mais pas trop forte pour ne pas bloquer si c'est la seule option
-                    t_score -= self.params['w_grouping'] * 0.5
+                    t_score -= self.params['w_grouping'] * 0.5 # Pénalité ouverture nouvelle demi-journée
 
                 for cj in self.all_possible_jurys:
                     if cj == tuteur: continue
                     
-                    # --- CONTRAINTE DURE : PARITÉ ---
-                    if charge_c[cj] >= self.target_cojury[cj]:
-                        continue
+                    if charge_c[cj] >= self.target_cojury[cj]: continue
 
                     f_cj = self.filieres.get(cj)
                     if f_tut and f_cj and f_tut != f_cj: continue 
@@ -381,7 +386,6 @@ class SchedulerEngine:
                         if slot['salle'] in jury_rooms[(cj, slot['jour'])]:
                             cj_score += self.params['w_room']
                             
-                    # NOUVEAU: Logique de regroupement pour le Co-Jury aussi
                     cnt_c = jury_halfday_counts[cj][hd_key]
                     if cnt_c == 1:
                         cj_score += self.params['w_grouping'] * 2
@@ -401,7 +405,6 @@ class SchedulerEngine:
                 occupied_slots.add(slot['id'])
                 busy_jurys[slot['key']].add(tuteur); busy_jurys[slot['key']].add(best_cj)
                 
-                # Mise à jour des compteurs demi-journée
                 hd_k = slot['half_day_key']
                 jury_halfday_counts[tuteur][hd_k] += 1
                 jury_halfday_counts[best_cj][hd_k] += 1
@@ -478,7 +481,6 @@ elif st.session_state.etape == 4:
     st.title("4. Import Disponibilités")
     st.info("Le fichier Excel doit contenir une colonne 'FILIERE' pour respecter les contraintes de spécialité.")
     
-    # Création moteur temporaire pour mapper les colonnes dates
     eng = SchedulerEngine([], st.session_state.dates, 1, st.session_state.duree, {}, {}, [], {})
     mapping_config = defaultdict(list)
     for s in eng.slots: k = s['key'].split(" | "); mapping_config[k[0]].append(k[1])
@@ -516,7 +518,7 @@ elif st.session_state.etape == 5:
         w_rand = c2.slider("Exploration (Aléatoire)", 0, 500, 100)
         c3, c4 = st.columns(2)
         w_cont = c3.slider("Poids Contiguïté (Slots collés)", 0, 5000, 2000)
-        w_group = c4.slider("Poids Regroupement (Min 2/demi-journée)", 0, 5000, 3000) # Augmenté par défaut
+        w_group = c4.slider("Poids Regroupement (Min 2/demi-journée)", 0, 5000, 3000)
         
         c5, c6 = st.columns(2)
         w_bal = c5.slider("Poids Équilibre", 0, 2000, 500)
@@ -549,7 +551,6 @@ elif st.session_state.etape == 5:
         else:
             c_stat2.success("Tous les étudiants sont placés !")
 
-        # --- TABLEAU DE BILAN DEMANDÉ ---
         if 'stats_charges' in st.session_state:
             st.subheader("📊 Tableau de Contrôle (Bilan Tuteur / Co-jury)")
             
@@ -564,8 +565,6 @@ elif st.session_state.etape == 5:
                 if not p: continue
                 c_t = charges[p]['tuteur']
                 c_c = charges[p]['cojury']
-                
-                # Calcul du Bilan : Cojury - Tuteur
                 bilan = c_c - c_t
                 
                 if c_t > 0 or c_c > 0:
@@ -580,9 +579,9 @@ elif st.session_state.etape == 5:
             
             def color_bilan(val):
                 if val == 0:
-                    return 'background-color: #d4edda; color: #155724; font-weight: bold;' # Vert
+                    return 'background-color: #d4edda; color: #155724; font-weight: bold;' 
                 elif val < 0:
-                    return 'background-color: #f8d7da; color: #721c24; font-weight: bold;' # Rouge
+                    return 'background-color: #f8d7da; color: #721c24; font-weight: bold;'
                 return ''
 
             st.dataframe(
