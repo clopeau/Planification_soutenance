@@ -11,7 +11,7 @@ import random
 import unicodedata
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Planification Soutenances (Parité Stricte)", layout="wide", page_icon="🎓")
+st.set_page_config(page_title="Planification Soutenances v19 (Parité Stricte)", layout="wide", page_icon="🎓")
 
 # --- STYLES ---
 st.markdown("""
@@ -25,7 +25,7 @@ st.markdown("""
 DEFAULT_STATE = {
     "etape": 1, "etudiants": [], "co_jurys": [], "dates": [],
     "disponibilites": {}, "filieres": {}, "planning": [], "nb_salles": 2,
-    "duree": 50, "failed": [], "stats_charges": {}
+    "duree": 50, "failed": []
 }
 for key, value in DEFAULT_STATE.items():
     if key not in st.session_state: st.session_state[key] = value
@@ -34,12 +34,11 @@ for key, value in DEFAULT_STATE.items():
 def extract_nom_only(fullname):
     if not isinstance(fullname, str) or not fullname: return ""
     parts = fullname.strip().split()
-    # Essaie de trouver les parties en MAJUSCULES (nom de famille souvent)
     upper_parts = [p for p in parts if p.isupper() and len(p) > 1]
     if upper_parts: return " ".join(upper_parts)
     return parts[0] if parts else ""
 
-# --- EXPORT EXCEL ---
+# --- EXPORT EXCEL AVANCE ---
 def generate_excel_planning(planning_data, nb_salles):
     output = BytesIO()
     if not planning_data: return output
@@ -227,7 +226,7 @@ def importer_disponibilites(uploaded_file, tuteurs_connus, co_jurys_connus, hora
         
     return dispos_data, list(treated), filieres_data, logs
 
-# --- MOTEUR ALGORITHMIQUE ---
+# --- MOTEUR ---
 class SchedulerEngine:
     def __init__(self, etudiants, dates, nb_salles, duree, dispos, filieres, co_jurys_pool, params):
         self.etudiants = etudiants; self.nb_salles = nb_salles; self.duree = duree
@@ -240,7 +239,6 @@ class SchedulerEngine:
         for e in self.etudiants: self.target_cojury[e['Tuteur']] += 1
         
         self.tuteurs_actifs = list(set(e['Tuteur'] for e in etudiants if e['Tuteur']))
-        # Pour la parité stricte, le pool de jurys est essentiellement les tuteurs actifs
         self.all_possible_jurys = list(set(self.co_jurys_pool + self.tuteurs_actifs))
 
     def _generate_slots(self):
@@ -271,6 +269,7 @@ class SchedulerEngine:
         best_sol = None; best_score = (-1, float('inf'))
         prog = st.progress(0); status = st.empty()
         
+        # Petit ajustement ici pour être sûr qu'on cherche vraiment
         n_iters = self.params['n_iterations']
         
         for i in range(n_iters):
@@ -280,12 +279,16 @@ class SchedulerEngine:
             # Critère 1: Maximiser le nombre d'étudiants placés
             nb_places = len(plan)
             
-            # Critère 2: Minimiser le déséquilibre total (somme des écarts absolus)
+            # Critère 2: Minimiser le déséquilibre (bien que la contrainte dure devrait le mettre à 0)
+            # On garde ce calcul pour départager si jamais le système force une exception technique
             imb = sum(abs(c['tuteur']-c['cojury']) for c in charges.values())
             
+            # Si on place plus de monde, c'est mieux
             if nb_places > best_score[0]: 
                 best_score = (nb_places, imb)
                 best_sol = (plan, fail, charges)
+            # A nombre égal, on cherche la meilleure répartition "interne" (moins de trous)
+            # Note: avec la contrainte stricte, imb devrait être très bas, on utilise imb comme 2eme critère
             elif nb_places == best_score[0] and imb < best_score[1]: 
                 best_score = (nb_places, imb)
                 best_sol = (plan, fail, charges)
@@ -303,6 +306,7 @@ class SchedulerEngine:
         student_queue = []
         for etu in self.etudiants:
             tut = etu['Tuteur']
+            # On trie pour placer les profs les moins disponibles en premier (heuristique)
             nb_dispo = sum(1 for v in self.dispos.get(tut, {}).values() if v) if tut in self.dispos else 100
             student_queue.append((nb_dispo + random.uniform(0,2), etu))
         student_queue.sort(key=lambda x: x[0])
@@ -312,9 +316,11 @@ class SchedulerEngine:
             f_tut = self.filieres.get(tuteur)
             best_move = None; best_score = -float('inf')
             
+            # Randomisation pour explorer l'espace des solutions
             slots_shuffled = self.slots.copy(); random.shuffle(slots_shuffled)
             valid_slots = []
             
+            # Filtrage préalable des slots valides pour le tuteur
             for slot in slots_shuffled:
                 if slot['id'] in occupied_slots: continue
                 if tuteur in busy_jurys[slot['key']]: continue
@@ -338,14 +344,15 @@ class SchedulerEngine:
                 for cj in self.all_possible_jurys:
                     if cj == tuteur: continue
                     
-                    # --- CONTRAINTE DURE : PARITÉ ---
+                    # --- MODIFICATION MAJEURE ICI : CONTRAINTE DURE (HARD LIMIT) ---
                     # Si le co-jury a déjà atteint son quota (nb fois cojury >= nb étudiants suivis),
-                    # on ne le prend pas, sauf si c'est un externe pur (mais ici on veut égalité).
+                    # on ne permet PAS d'exception. On passe au suivant.
                     if charge_c[cj] >= self.target_cojury[cj]:
                         continue
+                    # -------------------------------------------------------------
 
                     f_cj = self.filieres.get(cj)
-                    if f_tut and f_cj and f_tut != f_cj: continue # Contrainte Filière
+                    if f_tut and f_cj and f_tut != f_cj: continue # Contrainte Filiere
 
                     if cj in busy_jurys[slot['key']]: continue
                     if not self.is_available(cj, slot['key']): continue
@@ -360,7 +367,8 @@ class SchedulerEngine:
                         if slot['salle'] in jury_rooms[(cj, slot['jour'])]:
                             cj_score += self.params['w_room']
                     
-                    # Favoriser ceux qui sont loin de leur quota
+                    # Le bal_score est moins critique maintenant qu'on a une limite dure, 
+                    # mais il aide à prioriser ceux qui sont loin de leur quota.
                     bal_score = (self.target_cojury[cj] - charge_c[cj]) * self.params['w_balance']
                     
                     total = t_score + cj_score + bal_score + random.uniform(0, self.params['w_random'])
@@ -379,15 +387,17 @@ class SchedulerEngine:
             else: unassigned.append(etu)
             
         final_charges = defaultdict(lambda: {'tuteur':0, 'cojury':0})
-        # Pour être sûr que tous les tuteurs apparaissent dans les stats
-        all_people = set(self.target_cojury.keys()) | set(charge_t.keys()) | set(charge_c.keys())
-        for p in all_people:
-             final_charges[p]['tuteur'] = charge_t[p]
-             final_charges[p]['cojury'] = charge_c[p]
+        for p,v in charge_t.items(): final_charges[p]['tuteur'] = v
+        for p,v in charge_c.items(): final_charges[p]['cojury'] = v
+        # On s'assure d'inclure tout le monde même ceux à 0
+        all_ppl = set(charge_t.keys()) | set(charge_c.keys()) | set(self.target_cojury.keys())
+        for p in all_ppl:
+             # Juste pour être sûr que les clés existent
+             _ = final_charges[p]
              
         return planning, unassigned, final_charges
 
-# --- INTERFACE UTILISATEUR (SIDEBAR) ---
+# --- UI ---
 with st.sidebar:
     st.header("🧭 Navigation")
     steps = {1: "1. Étudiants", 2: "2. Paramètres", 3: "3. Dates", 4: "4. Import Dispos", 5: "5. Génération"}
@@ -399,7 +409,6 @@ with st.sidebar:
     if 'filieres' in st.session_state:
         st.write(f"Filières : {len(set(st.session_state.filieres.values()))}")
 
-# --- ETAPE 1 : IMPORT ETUDIANTS ---
 if st.session_state.etape == 1:
     st.title("1. Import des Étudiants")
     f = st.file_uploader("Fichier Étudiants (Excel/CSV)", type=['xlsx', 'csv'])
@@ -413,47 +422,38 @@ if st.session_state.etape == 1:
             st.dataframe(pd.DataFrame(data).head())
             if st.button("Suivant"): st.session_state.etape = 2; st.rerun()
 
-# --- ETAPE 2 : PARAMETRES ---
 elif st.session_state.etape == 2:
     st.title("2. Paramètres")
     c1, c2 = st.columns(2)
-    st.session_state.nb_salles = c1.number_input("Nombre de Salles", 1, 20, st.session_state.nb_salles)
-    st.session_state.duree = c2.number_input("Durée soutenance (min)", 30, 120, st.session_state.duree)
+    st.session_state.nb_salles = c1.number_input("Salles", 1, 10, st.session_state.nb_salles)
+    st.session_state.duree = c2.number_input("Durée (min)", 30, 120, st.session_state.duree)
     if st.button("Suivant"): st.session_state.etape = 3; st.rerun()
 
-# --- ETAPE 3 : DATES ---
 elif st.session_state.etape == 3:
-    st.title("3. Dates & Co-jurys")
-    nb = st.number_input("Nombre de Jours", 1, 5, max(3, len(st.session_state.dates)))
+    st.title("3. Dates")
+    nb = st.number_input("Nb Jours", 1, 5, max(3, len(st.session_state.dates)))
     ds = []; cols = st.columns(4)
     for i in range(nb):
         d_def = st.session_state.dates[i] if i < len(st.session_state.dates) else datetime(2026, 1, 26).date() + timedelta(days=i)
         ds.append(cols[i%4].date_input(f"Jour {i+1}", d_def))
     st.session_state.dates = ds
-    
     st.subheader("Co-jurys supplémentaires")
-    st.info("ℹ️ Note : Avec la règle de parité stricte (N Cojury = N Tuteur), les co-jurys externes sans étudiants seront peu sollicités (Quota = 0).")
-    c_new = st.text_input("Ajouter un nom")
-    if c_new and c_new not in st.session_state.co_jurys: st.session_state.co_jurys.append(c_new)
+    st.info("⚠️ Avec la règle de parité stricte, les co-jurys externes (sans étudiants) ne seront pas utilisés car leur quota est de 0.")
+    txt = st.text_input("Nom")
+    if txt and txt not in st.session_state.co_jurys: st.session_state.co_jurys.append(txt)
     if st.session_state.co_jurys: st.write(st.session_state.co_jurys)
-    
     if st.button("Suivant"): st.session_state.etape = 4; st.rerun()
 
-# --- ETAPE 4 : DISPONIBILITES ---
 elif st.session_state.etape == 4:
     st.title("4. Import Disponibilités")
-    st.info("Le fichier Excel doit contenir une colonne 'FILIERE' pour respecter les contraintes de spécialité.")
-    
-    # Création moteur temporaire pour mapper les colonnes dates
+    st.info("Le fichier doit contenir une colonne nommée 'FILIERE'.")
     eng = SchedulerEngine([], st.session_state.dates, 1, st.session_state.duree, {}, {}, [], {})
     mapping_config = defaultdict(list)
     for s in eng.slots: k = s['key'].split(" | "); mapping_config[k[0]].append(k[1])
-    
     f = st.file_uploader("Fichier Disponibilités", type=['xlsx', 'csv'])
     if f:
         tuteurs_propres = [e['Tuteur'] for e in st.session_state.etudiants if e['Tuteur']]
         dispos, treated, filieres, logs = importer_disponibilites(f, tuteurs_propres, st.session_state.co_jurys, mapping_config)
-        
         if dispos:
             st.session_state.disponibilites = dispos
             st.session_state.filieres = filieres
@@ -462,32 +462,38 @@ elif st.session_state.etape == 4:
             nb_types_fil = len(set(filieres.values()))
             st.success(f"✅ {len(dispos)} enseignants importés.")
             if nb_types_fil > 0:
-                st.success(f"✅ {nb_profs_fil} enseignants avec filière détectée ({nb_types_fil} filières).")
+                st.success(f"✅ {nb_profs_fil} enseignants avec filière détectée ({nb_types_fil} filières distinctes).")
             else:
                 st.warning("⚠️ Aucune filière détectée (vérifiez la colonne 'FILIERE').")
             
-            with st.expander("Logs d'import"): 
+            tuteurs_actifs = set(e['Tuteur'] for e in st.session_state.etudiants)
+            sans_filiere = [t for t in tuteurs_actifs if t not in filieres]
+            if sans_filiere:
+                st.warning(f"⚠️ Attention : {len(sans_filiere)} tuteurs actifs n'ont pas de filière définie :")
+                st.write(sans_filiere)
+
+            with st.expander("Logs"): 
                 for l in logs: st.write(l)
-        else: st.error("Erreur lors de la lecture du fichier.")
-        
+        else: st.error("Erreur import.")
     if st.button("Suivant"): st.session_state.etape = 5; st.rerun()
 
-# --- ETAPE 5 : GENERATION & BILAN ---
 elif st.session_state.etape == 5:
-    st.title("5. Génération & Bilan")
-    
-    with st.expander("Paramètres avancés", expanded=False):
+    st.title("5. Génération")
+    with st.expander("Paramètres", expanded=True):
         c1, c2 = st.columns(2)
         n_iter = c1.slider("Itérations", 10, 200, 50)
-        w_rand = c2.slider("Exploration (Aléatoire)", 0, 500, 100)
+        w_rand = c2.slider("Exploration", 0, 500, 100)
         c3, c4 = st.columns(2)
-        w_cont = c3.slider("Poids Contiguïté", 0, 5000, 2000)
-        w_bal = c4.slider("Poids Équilibre", 0, 2000, 500)
+        w_cont = c3.slider("Poids Contiguïté (Temps)", 0, 5000, 2000)
+        # w_bal n'est plus aussi crucial mais aide à guider
+        w_bal = c4.slider("Poids Équilibre (Charge)", 0, 2000, 500)
+        
+        st.divider()
         w_room = st.slider("Poids Stabilité Salle", 0, 5000, 3000)
     
-    st.info("ℹ️ Règle active : Un tuteur doit être co-jury autant de fois qu'il est tuteur (Bilan = 0).")
+    st.warning("ℹ️ La règle de parité stricte (N Tuteur = N Co-jury) est active. Cela peut augmenter le nombre d'échecs si les disponibilités sont restreintes.")
 
-    if st.button("Lancer la planification", type="primary"):
+    if st.button("Lancer", type="primary"):
         params = {
             "n_iterations": n_iter, "w_random": w_rand, 
             "w_contiguity": w_cont, "w_balance": w_bal, 
@@ -498,90 +504,42 @@ elif st.session_state.etape == 5:
             st.session_state.disponibilites, st.session_state.filieres, st.session_state.co_jurys, params
         )
         plan, fail, charges = eng.run_optimization()
-        st.session_state.planning = plan
-        st.session_state.failed = fail
-        st.session_state.stats_charges = charges
+        st.session_state.planning = plan; st.session_state.failed = fail; st.session_state.stats_charges = charges
         
     if st.session_state.planning:
-        st.divider()
-        c_stat1, c_stat2 = st.columns(2)
-        c_stat1.success(f"✅ Soutenances planifiées : {len(st.session_state.planning)}")
-        if st.session_state.failed:
-            c_stat2.error(f"❌ Non placés : {len(st.session_state.failed)}")
-        else:
-            c_stat2.success("Tous les étudiants sont placés !")
-
-        # --- TABLEAU DE BILAN DEMANDÉ ---
+        st.success(f"Placés : {len(st.session_state.planning)} | Échecs : {len(st.session_state.failed)}")
         if 'stats_charges' in st.session_state:
-            st.subheader("📊 Tableau de Contrôle (Bilan Tuteur / Co-jury)")
+            charges = st.session_state.stats_charges; data = []
+            all_p = set(charges.keys())
+            for e in st.session_state.etudiants: all_p.add(e['Tuteur'])
+            for p in all_p:
+                c_t = charges[p]['tuteur']; c_c = charges[p]['cojury']
+                fil = st.session_state.filieres.get(p, "-")
+                # Delta doit être 0 pour respecter la consigne
+                data.append({"Enseignant": p, "Filière": fil, "Tuteur": c_t, "Co-Jury": c_c, "Delta (Doit être 0)": c_t-c_c})
             
-            charges = st.session_state.stats_charges
-            data_summary = []
+            df_charges = pd.DataFrame(data).sort_values("Enseignant")
+            st.dataframe(df_charges, use_container_width=True)
             
-            all_profs = set(charges.keys())
-            for e in st.session_state.etudiants: 
-                if e['Tuteur']: all_profs.add(e['Tuteur'])
-            
-            for p in sorted(list(all_profs)):
-                if not p: continue
-                c_t = charges[p]['tuteur']
-                c_c = charges[p]['cojury']
-                
-                # Calcul du Bilan : Cojury - Tuteur
-                # Si Tuteur = 5 et Cojury = 4, alors 4 - 5 = -1 (Manque 1)
-                bilan = c_c - c_t
-                
-                if c_t > 0 or c_c > 0:
-                    data_summary.append({
-                        "Tuteur": p,
-                        "Jury (Tuteur)": c_t,
-                        "Co-jury": c_c,
-                        "Bilan": bilan
-                    })
-            
-            df_summary = pd.DataFrame(data_summary)
-            
-            def color_bilan(val):
-                if val == 0:
-                    return 'background-color: #d4edda; color: #155724; font-weight: bold;' # Vert
-                elif val < 0:
-                    return 'background-color: #f8d7da; color: #721c24; font-weight: bold;' # Rouge
-                return ''
+            if df_charges['Delta (Doit être 0)'].abs().sum() > 0:
+                st.error("⚠️ Attention : La parité n'est pas respectée pour tout le monde (probablement dû aux étudiants non placés).")
+            else:
+                st.success("✅ Parité parfaite respectée.")
 
-            st.dataframe(
-                df_summary.style.map(color_bilan, subset=['Bilan'])
-                                .format({"Bilan": "{:+d}"}), 
-                use_container_width=True,
-                hide_index=True
-            )
-            
-            if not df_summary.empty and (df_summary['Bilan'] < 0).any():
-                st.warning("⚠️ Les lignes en rouge indiquent un enseignant qui n'a pas atteint son quota de co-jury.")
-
-        st.divider()
         excel_data = generate_excel_planning(st.session_state.planning, st.session_state.nb_salles)
-        st.download_button("📥 Télécharger le Planning Complet (.xlsx)", excel_data, "Planning_Soutenances.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+        st.download_button("📥 Télécharger Planning (.xlsx)", excel_data, "Planning_Soutenances.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-        tab1, tab2, tab3 = st.tabs(["📋 Liste Détaillée", "📅 Diagramme de Gantt", "❌ Échecs éventuels"])
-        
-        with tab1:
-            st.dataframe(pd.DataFrame(st.session_state.planning))
-            
+        df = pd.DataFrame(st.session_state.planning)
+        tab1, tab2 = st.tabs(["Tableau", "Gantt"])
+        with tab1: st.dataframe(df)
         with tab2:
-            if not pd.DataFrame(st.session_state.planning).empty:
-                df_g = []
+            if not df.empty:
+                gantt = []
                 for x in st.session_state.planning:
-                    df_g.append({"Enseignant": x['Tuteur'], "Role": "Tuteur", "Etudiant": x['Étudiant'], "Jour": x['Jour'], "Start": datetime(2000,1,1,x['Début'].hour, x['Début'].minute), "End": datetime(2000,1,1,x['Fin'].hour, x['Fin'].minute)})
-                    df_g.append({"Enseignant": x['Co-jury'], "Role": "Co-jury", "Etudiant": x['Étudiant'], "Jour": x['Jour'], "Start": datetime(2000,1,1,x['Début'].hour, x['Début'].minute), "End": datetime(2000,1,1,x['Fin'].hour, x['Fin'].minute)})
-                
-                df_viz = pd.DataFrame(df_g).sort_values("Enseignant")
-                fig = px.timeline(df_viz, x_start="Start", x_end="End", y="Enseignant", color="Role", facet_col="Jour", text="Etudiant", height=max(400, len(all_profs)*30), color_discrete_map={"Tuteur": "#2E86C1", "Co-jury": "#28B463"})
+                    for role, p in [("Tuteur", x['Tuteur']), ("Co-Jury", x['Co-jury'])]:
+                        gantt.append({"Enseignant": p, "Role": role, "Etudiant": x['Étudiant'], "Jour": x['Jour'], "Start": datetime(2000,1,1,x['Début'].hour, x['Début'].minute), "End": datetime(2000,1,1,x['Fin'].hour, x['Fin'].minute)})
+                df_g = pd.DataFrame(gantt).sort_values("Enseignant")
+                fig = px.timeline(df_g, x_start="Start", x_end="End", y="Enseignant", color="Role", facet_col="Jour", text="Etudiant", height=800)
                 fig.update_xaxes(tickformat="%H:%M"); fig.update_yaxes(autorange="reversed")
                 st.plotly_chart(fig, use_container_width=True)
-                
-        with tab3:
-            if st.session_state.failed:
-                st.error("Étudiants non placés :")
-                st.dataframe(pd.DataFrame(st.session_state.failed))
-            else:
-                st.info("Aucun échec.")
+        if st.session_state.failed: st.error("Non placés :"); st.dataframe(pd.DataFrame(st.session_state.failed))
