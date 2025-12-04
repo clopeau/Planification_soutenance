@@ -13,7 +13,7 @@ import math
 import copy
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Planification Soutenances v22 (Recuit + Confort Ajusté)", layout="wide", page_icon="🎓")
+st.set_page_config(page_title="Planification Soutenances v23 (Anti-Isolé)", layout="wide", page_icon="🎓")
 
 # --- STYLES ---
 st.markdown("""
@@ -378,11 +378,25 @@ class AnnealingScheduler:
                 
         cost += phys_conflicts * 50_000
 
-        # 4. Confort (Trous & Salles)
+        # 4. Confort (Trous & Salles) & 5. Anti-Isolé
         
         for p, entries in person_schedule.items():
             if not entries: continue
-            # Tri chronologique
+            
+            # 5. Règle "Pas de soutenance isolée" (Minimum 2 par demi-journée)
+            sessions_by_halfday = defaultdict(int)
+            for t, _, _ in entries:
+                day_key = t.strftime("%Y%m%d")
+                period = "AM" if t.hour < 13 else "PM" # Coupe à 13h
+                sessions_by_halfday[(day_key, period)] += 1
+            
+            for count in sessions_by_halfday.values():
+                if count == 1:
+                    # C'est une soutenance orpheline sur la demi-journée
+                    # Pénalité très forte (supérieure aux trous, proche de la parité)
+                    cost += 20_000 
+            
+            # Tri chronologique pour les trous
             entries.sort(key=lambda x: x[0])
             
             for i in range(len(entries) - 1):
@@ -396,23 +410,17 @@ class AnnealingScheduler:
                 if delta_min == 0:
                     # Contigu : OK, on vérifie juste la salle
                     if room1 != room2:
-                        cost += 100 # MODIFIÉ: Pénalité salle réduite (100)
+                        cost += 100 
                 
                 elif delta_min < 0:
-                    # Chevauchement (déjà puni par phys_conflicts)
                     cost += 1000
                 
                 else:
                     # Il y a un trou
                     if delta_min > 90: 
-                        # Grand trou (>1h30)
-                        # Pour éviter de "préférer" un grand trou à plein de petits trous,
-                        # on garde un coût élevé fixe, mais inférieur à 100 * 90 (qui ferait 9000).
-                        # On met une pénalité fixe dissuasive pour les journées gruyère.
                         cost += 2000 
                     else:
-                        # Petit trou : Puni très sévèrement par minute
-                        cost += delta_min * 100 # MODIFIÉ: 100 pts/min
+                        cost += delta_min * 100 
         
         return cost
 
@@ -525,7 +533,7 @@ with st.sidebar:
     sel = st.radio("Aller à :", list(steps.keys()), format_func=lambda x: steps[x], index=st.session_state.etape -1)
     if sel != st.session_state.etape: st.session_state.etape = sel; st.rerun()
     st.divider()
-    st.info("Algorithme v3.1 : Parité Stricte + Compactage (100pts/min) + Salle souple")
+    st.info("Algorithme v3.2 : Parité + Compactage + Minimum 2 par demi-journée")
 
 if st.session_state.etape == 1:
     st.title("1. Import des Étudiants")
@@ -580,9 +588,9 @@ elif st.session_state.etape == 5:
     
     st.write("Cet algorithme va chercher une solution qui minimise (dans l'ordre) :")
     st.write("1. Les étudiants non placés (Priorité absolue)")
-    st.write("2. Les écarts de parité (Strict)")
-    st.write("3. Les trous dans l'emploi du temps (Confort Fort: 100pts/min)")
-    st.write("4. Les changements de salle intempestifs (Confort Faible: 100pts/swap)")
+    st.write("2. Les soutenances orphelines (Min 2 par demi-journée)")
+    st.write("3. Les écarts de parité")
+    st.write("4. Les trous dans l'emploi du temps")
     
     n_iter = st.slider("Puissance de calcul (Temps vs Qualité)", 50, 500, 200)
     
