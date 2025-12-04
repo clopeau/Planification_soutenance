@@ -11,7 +11,7 @@ import random
 import unicodedata
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Planification Soutenances (Stratégie Condensation)", layout="wide", page_icon="🎓")
+st.set_page_config(page_title="Planification Soutenances (Visuel Avancé)", layout="wide", page_icon="🎓")
 
 # --- STYLES ---
 st.markdown("""
@@ -234,7 +234,6 @@ class SchedulerEngine:
         self.co_jurys_pool = list(set(co_jurys_pool)); self.params = params
         self.slots = self._generate_slots()
         
-        # Cible : Nombre d'étudiants pour chaque tuteur
         self.target_cojury = defaultdict(int)
         for e in self.etudiants: self.target_cojury[e['Tuteur']] += 1
         
@@ -303,7 +302,6 @@ class SchedulerEngine:
         jury_halfday_counts = defaultdict(lambda: defaultdict(int))
         
         # --- STRATEGIE DE TRI (PRIORITÉ) ---
-        # 1. Calculer la charge de travail (Nombre d'étudiants) par prof
         tutor_workload = defaultdict(int)
         for e in self.etudiants:
             tutor_workload[e['Tuteur']] += 1
@@ -311,19 +309,14 @@ class SchedulerEngine:
         student_queue = []
         for etu in self.etudiants:
             tut = etu['Tuteur']
-            # Nombre de dispos (si inconnu, on met 999 pour dire "très flexible, à traiter en dernier")
             nb_dispo = sum(1 for v in self.dispos.get(tut, {}).values() if v) if tut in self.dispos else 999
             nb_etu = tutor_workload[tut]
             
             # SCORE DE PRIORITÉ : (Petit score = Haute priorité)
-            # On veut traiter en premier ceux qui ont :
-            # 1. Peu de disponibilités (nb_dispo faible)
-            # 2. Peu d'étudiants (nb_etu faible) => pour les regrouper tout de suite
             priority_score = (nb_dispo * 1.5) + (nb_etu * 1.0) + random.uniform(0, 0.5)
             
             student_queue.append((priority_score, etu))
             
-        # Tri Ascendant (Les plus contraints/petits en premier)
         student_queue.sort(key=lambda x: x[0])
         
         for _, etu in student_queue:
@@ -363,7 +356,7 @@ class SchedulerEngine:
                 elif cnt_t > 1:
                     t_score += self.params['w_grouping']
                 elif cnt_t == 0:
-                    t_score -= self.params['w_grouping'] * 0.5 # Pénalité ouverture nouvelle demi-journée
+                    t_score -= self.params['w_grouping'] * 0.5 
 
                 for cj in self.all_possible_jurys:
                     if cj == tuteur: continue
@@ -606,13 +599,63 @@ elif st.session_state.etape == 5:
         with tab2:
             if not pd.DataFrame(st.session_state.planning).empty:
                 df_g = []
+                # 1. Ajouter les créneaux planifiés
                 for x in st.session_state.planning:
                     df_g.append({"Enseignant": x['Tuteur'], "Role": "Tuteur", "Etudiant": x['Étudiant'], "Jour": x['Jour'], "Start": datetime(2000,1,1,x['Début'].hour, x['Début'].minute), "End": datetime(2000,1,1,x['Fin'].hour, x['Fin'].minute)})
                     df_g.append({"Enseignant": x['Co-jury'], "Role": "Co-jury", "Etudiant": x['Étudiant'], "Jour": x['Jour'], "Start": datetime(2000,1,1,x['Début'].hour, x['Début'].minute), "End": datetime(2000,1,1,x['Fin'].hour, x['Fin'].minute)})
                 
+                # 2. Ajouter les barres rouges d'indisponibilités
+                if st.session_state.disponibilites:
+                    # Reconstruction rapide des slots théoriques pour vérifier chaque prof
+                    slots_ref = []
+                    for d in st.session_state.dates:
+                        d_str = d.strftime("%A %d/%m/%Y")
+                        for period in [("08:00", "12:10"), ("14:00", "18:10")]:
+                            try:
+                                start = datetime.combine(d, datetime.strptime(period[0], "%H:%M").time())
+                                end_period = datetime.combine(d, datetime.strptime(period[1], "%H:%M").time())
+                                curr = start
+                                while curr + timedelta(minutes=st.session_state.duree) <= end_period:
+                                    fin = curr + timedelta(minutes=st.session_state.duree)
+                                    h_str = f"{curr.strftime('%H:%M')} - {fin.strftime('%H:%M')}"
+                                    key = f"{d_str} | {h_str}"
+                                    slots_ref.append({
+                                        "key": key, "jour": d_str,
+                                        "start": datetime(2000,1,1,curr.hour, curr.minute),
+                                        "end": datetime(2000,1,1,fin.hour, fin.minute)
+                                    })
+                                    curr = fin
+                            except: continue
+                    
+                    # On parcourt tous les profs actifs
+                    all_p_gantt = set(x['Enseignant'] for x in df_g)
+                    for p in all_p_gantt:
+                        if p in st.session_state.disponibilites:
+                            p_dispos = st.session_state.disponibilites[p]
+                            for s in slots_ref:
+                                # Si explicitement marqué False dans le fichier importé
+                                if s['key'] in p_dispos and not p_dispos[s['key']]:
+                                    df_g.append({
+                                        "Enseignant": p,
+                                        "Role": "Indisponible",
+                                        "Etudiant": "N/A", # Pas d'info bulle pertinente
+                                        "Jour": s['jour'],
+                                        "Start": s['start'],
+                                        "End": s['end']
+                                    })
+
                 df_viz = pd.DataFrame(df_g).sort_values("Enseignant")
-                fig = px.timeline(df_viz, x_start="Start", x_end="End", y="Enseignant", color="Role", facet_col="Jour", text="Etudiant", height=max(400, len(all_profs)*30), color_discrete_map={"Tuteur": "#2E86C1", "Co-jury": "#28B463"})
-                fig.update_xaxes(tickformat="%H:%M"); fig.update_yaxes(autorange="reversed")
+                
+                # Création du graphique
+                # text=None pour ne pas avoir le nom sur la barre
+                fig = px.timeline(df_viz, x_start="Start", x_end="End", y="Enseignant", color="Role", 
+                                  facet_col="Jour", 
+                                  hover_data={"Etudiant": True, "Role": True},
+                                  height=max(400, len(all_p_gantt)*35), 
+                                  color_discrete_map={"Tuteur": "#2E86C1", "Co-jury": "#28B463", "Indisponible": "#E74C3C"})
+                
+                fig.update_xaxes(tickformat="%H:%M")
+                fig.update_yaxes(autorange="reversed")
                 st.plotly_chart(fig, use_container_width=True)
                 
         with tab3:
