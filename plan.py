@@ -13,6 +13,12 @@ import unicodedata
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Planification Soutenances (Anti-Isolés)", layout="wide", page_icon="🎓")
 
+# --- FUSEAUX HORAIRES (CONTRAINTES GÉOGRAPHIQUES) ---
+# Pays nécessitant le MATIN en France (Asie / Océanie)
+PAYS_MATIN = ["AUSTRALIE", "INDONESIE", "JAPON", "CHINE", "VIETNAM", "SINGAPOUR", "INDE", "THAILANDE", "COREE", "NOUVELLE-ZELANDE"]
+# Pays nécessitant l'APRÈS-MIDI en France (Amériques)
+PAYS_APREM = ["ETATS-UNIS", "MEXIQUE", "BRESIL", "CANADA", "ARGENTINE", "COLOMBIE", "PEROU", "CHILI", "QUEBEC", "USA"]
+
 # --- STYLES ---
 st.markdown("""
     <style>
@@ -271,20 +277,14 @@ class SchedulerEngine:
         
     def _count_orphans(self, planning):
         """Compte le nombre de créneaux isolés (1 seul sur une 1/2 journée) pour tous les profs"""
-        # Clé = (Prof, Jour, AM/PM) -> Valeur = Count
         counts = defaultdict(int)
         for slot in planning:
-            # Récupérer l'info AM/PM
             is_am = slot['Début'].hour < 13
             hd_key = (slot['Jour'], 'AM' if is_am else 'PM')
-            
             counts[(slot['Tuteur'], hd_key)] += 1
             counts[(slot['Co-jury'], hd_key)] += 1
             
-        # On compte combien de clés ont une valeur de 1
         orphans = sum(1 for c in counts.values() if c == 1)
-        
-        # On peut aussi retourner le détail par prof pour l'affichage
         orphans_by_prof = defaultdict(int)
         for (prof, _), cnt in counts.items():
             if cnt == 1: orphans_by_prof[prof] += 1
@@ -292,12 +292,8 @@ class SchedulerEngine:
         return orphans, orphans_by_prof
 
     def run_optimization(self):
-        # Best Score format: (Nb Placés, -Nb Orphelins, -Déséquilibre)
-        # On veut Maximiser Placés, puis Minimiser Orphelins (donc Max -Orphelins), puis Minimiser Déséquilibre
         best_sol = None; best_score = (-1, -float('inf'), -float('inf'))
-        
         prog = st.progress(0); status = st.empty()
-        
         n_iters = self.params['n_iterations']
         
         for i in range(n_iters):
@@ -305,17 +301,13 @@ class SchedulerEngine:
             plan, fail, charges = self._solve_single_run()
             
             nb_places = len(plan)
-            
-            # Calcul des orphelins (singletons sur une demi-journée)
             nb_orphans, orphans_details = self._count_orphans(plan)
-            
             imb = sum(abs(c['tuteur']-c['cojury']) for c in charges.values())
             
             current_score = (nb_places, -nb_orphans, -imb)
             
             if current_score > best_score: 
                 best_score = current_score
-                # On sauvegarde aussi le détail des orphelins pour l'affichage final
                 best_sol = (plan, fail, charges, orphans_details)
                 
         prog.empty(); status.empty()
@@ -363,7 +355,20 @@ class SchedulerEngine:
             
             for slot in valid_slots:
                 hd_key = slot['half_day_key']
+                is_am = slot['start'].hour < 13
                 
+                # --- GESTION DU FUSEAU HORAIRE ---
+                tz_score = 0
+                pays_etu = normalize_text(etu.get('Pays', ''))
+                
+                # Pénalité forte si placement l'après-midi pour un pays Asie/Océanie
+                if any(p in pays_etu for p in PAYS_MATIN) and not is_am:
+                    tz_score -= self.params.get('w_timezone', 10000)
+                    
+                # Pénalité forte si placement le matin pour un pays d'Amérique
+                elif any(p in pays_etu for p in PAYS_APREM) and is_am:
+                    tz_score -= self.params.get('w_timezone', 10000)
+
                 # --- SCORE TUTEUR ---
                 t_score = 0
                 t_prev = slot['start'] - timedelta(minutes=self.duree); t_next = slot['end']
@@ -378,11 +383,10 @@ class SchedulerEngine:
                 # Regroupement Demi-journée (Min 2)
                 cnt_t = jury_halfday_counts[tuteur][hd_key]
                 if cnt_t == 1: 
-                    t_score += self.params['w_grouping'] * 2.5 # Bonus très fort pour faire la paire
+                    t_score += self.params['w_grouping'] * 2.5
                 elif cnt_t > 1:
                     t_score += self.params['w_grouping']
                 elif cnt_t == 0:
-                    # Pénalité plus forte pour éviter d'ouvrir une demi-journée isolée
                     t_score -= self.params['w_grouping'] * 1.5 
 
                 for cj in self.all_possible_jurys:
@@ -416,7 +420,8 @@ class SchedulerEngine:
                     
                     bal_score = (self.target_cojury[cj] - charge_c[cj]) * self.params['w_balance']
                     
-                    total = t_score + cj_score + bal_score + random.uniform(0, self.params['w_random'])
+                    # TOTAL INCLUANT LE FUSEAU HORAIRE
+                    total = t_score + cj_score + bal_score + tz_score + random.uniform(0, self.params['w_random'])
                     if total > best_score: best_score = total; best_move = (slot, cj)
             
             if best_move:
@@ -544,14 +549,15 @@ elif st.session_state.etape == 5:
         w_bal = c5.slider("Poids Équilibre", 0, 2000, 500)
         w_room = c6.slider("Poids Stabilité Salle", 0, 5000, 3000)
     
-    st.info("ℹ️ Règle active : Un tuteur doit être co-jury autant de fois qu'il est tuteur (Bilan = 0).")
+    st.info("ℹ️ Règle active : Les étudiants en Asie/Océanie seront planifiés le matin, ceux aux Amériques l'après-midi.")
 
     if st.button("Lancer la planification", type="primary"):
         params = {
             "n_iterations": n_iter, "w_random": w_rand, 
             "w_contiguity": w_cont, "w_balance": w_bal, 
             "w_day": 100, "w_room": w_room,
-            "w_grouping": w_group
+            "w_grouping": w_group,
+            "w_timezone": 10000  # Pénalité énorme pour forcer le respect du fuseau
         }
         eng = SchedulerEngine(
             st.session_state.etudiants, st.session_state.dates, st.session_state.nb_salles, st.session_state.duree, 
@@ -639,12 +645,10 @@ elif st.session_state.etape == 5:
         with tab2:
             if not pd.DataFrame(st.session_state.planning).empty:
                 df_g = []
-                # 1. Ajouter les créneaux planifiés
                 for x in st.session_state.planning:
                     df_g.append({"Enseignant": x['Tuteur'], "Role": "Tuteur", "Etudiant": x['Étudiant'], "Jour": x['Jour'], "Start": datetime(2000,1,1,x['Début'].hour, x['Début'].minute), "End": datetime(2000,1,1,x['Fin'].hour, x['Fin'].minute)})
                     df_g.append({"Enseignant": x['Co-jury'], "Role": "Co-jury", "Etudiant": x['Étudiant'], "Jour": x['Jour'], "Start": datetime(2000,1,1,x['Début'].hour, x['Début'].minute), "End": datetime(2000,1,1,x['Fin'].hour, x['Fin'].minute)})
                 
-                # 2. Ajouter les barres rouges d'indisponibilités
                 if st.session_state.disponibilites:
                     slots_ref = []
                     for d in st.session_state.dates:
@@ -687,7 +691,6 @@ elif st.session_state.etape == 5:
                                   facet_col="Jour", 
                                   hover_data={"Etudiant": True, "Role": True},
                                   height=max(400, len(all_p_gantt)*35), 
-                                  # Utilisation de RGBA pour la transparence sur "Indisponible"
                                   color_discrete_map={
                                       "Tuteur": "#2E86C1", 
                                       "Co-jury": "#28B463", 
