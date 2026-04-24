@@ -9,14 +9,13 @@ from thefuzz import fuzz
 import re
 import random
 import unicodedata
+import time  # <-- NOUVEL IMPORT POUR LE CHRONOMÈTRE
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Planification Soutenances (Anti-Isolés)", layout="wide", page_icon="🎓")
 
 # --- FUSEAUX HORAIRES (CONTRAINTES GÉOGRAPHIQUES) ---
-# Pays nécessitant le MATIN en France (Asie / Océanie)
 PAYS_MATIN = ["AUSTRALIE", "INDONESIE", "JAPON", "CHINE", "VIETNAM", "SINGAPOUR", "INDE", "THAILANDE", "COREE", "NOUVELLE-ZELANDE"]
-# Pays nécessitant l'APRÈS-MIDI en France (Amériques)
 PAYS_APREM = ["ETATS-UNIS", "MEXIQUE", "BRESIL", "CANADA", "ARGENTINE", "COLOMBIE", "PEROU", "CHILI", "QUEBEC", "USA"]
 
 # --- STYLES ---
@@ -276,7 +275,6 @@ class SchedulerEngine:
         return self.dispos[person].get(slot_key, False)
         
     def _count_orphans(self, planning):
-        """Compte le nombre de créneaux isolés (1 seul sur une 1/2 journée) pour tous les profs"""
         counts = defaultdict(int)
         for slot in planning:
             is_am = slot['Début'].hour < 13
@@ -292,18 +290,23 @@ class SchedulerEngine:
         return orphans, orphans_by_prof
 
     def run_optimization(self):
-        best_sol = None; best_score = (-1, -float('inf'), -float('inf'))
-        prog = st.progress(0); status = st.empty()
-        n_iters = self.params['n_iterations']
+        best_sol = None
+        best_score = (-1, -float('inf'), -float('inf'))
+        best_scalar = -float('inf')
         
-        # Optimisation : pour éviter de faire ramer l'interface si on fait 10000 boucles
+        # --- UI ELEMENTS POUR LE CHRONO ET LE GRAPHIQUE ---
+        prog = st.progress(0)
+        status = st.empty()
+        chart_container = st.empty()
+        
+        n_iters = self.params['n_iterations']
+        # Limiter les rafraîchissements pour ne pas faire ramer l'application
         update_freq = max(1, n_iters // 100) 
         
+        start_time = time.time()
+        score_history = []
+        
         for i in range(n_iters):
-            if i % update_freq == 0 or i == n_iters - 1:
-                prog.progress((i+1)/n_iters)
-                status.write(f"Simulation en cours... ({i+1} / {n_iters} générées. Calcul des meilleurs scores...)")
-                
             plan, fail, charges = self._solve_single_run()
             
             nb_places = len(plan)
@@ -312,11 +315,41 @@ class SchedulerEngine:
             
             current_score = (nb_places, -nb_orphans, -imb)
             
+            # --- CALCUL DU SCORE SCALAIRE POUR LE GRAPHIQUE ---
+            # Placement = +1000 pts | Orphelin = -10 pts | Déséquilibre = -1 pt
+            scalar_score = (nb_places * 1000) - (nb_orphans * 10) - imb
+            
             if current_score > best_score: 
                 best_score = current_score
+                best_scalar = scalar_score
                 best_sol = (plan, fail, charges, orphans_details)
                 
-        prog.empty(); status.empty()
+            score_history.append(best_scalar)
+            
+            # --- MISE À JOUR DE L'INTERFACE (ETA + GRAPHIQUE) ---
+            if i % update_freq == 0 or i == n_iters - 1:
+                prog.progress((i+1)/n_iters)
+                
+                # Calcul ETA (Temps restant estimé)
+                elapsed = time.time() - start_time
+                if i > 0:
+                    time_per_iter = elapsed / i
+                    rem_time = time_per_iter * (n_iters - i - 1)
+                    mins, secs = divmod(int(rem_time), 60)
+                    eta_str = f"{mins}m {secs:02d}s"
+                else:
+                    eta_str = "Calcul en cours..."
+                
+                status.info(f"⏳ **Simulation :** {i+1} / {n_iters} | ⏱️ **Temps restant :** {eta_str}")
+                
+                # Affichage du graphique
+                df_history = pd.DataFrame(score_history, columns=["Évolution du Meilleur Score"])
+                chart_container.line_chart(df_history, height=200)
+                
+        # Fin de la boucle
+        duree_totale = int(time.time() - start_time)
+        status.success(f"✅ **Optimisation terminée** en {duree_totale} secondes !")
+        
         return best_sol
 
     def _solve_single_run(self):
@@ -363,19 +396,14 @@ class SchedulerEngine:
                 hd_key = slot['half_day_key']
                 is_am = slot['start'].hour < 13
                 
-                # --- GESTION DU FUSEAU HORAIRE ---
                 tz_score = 0
                 pays_etu = normalize_text(etu.get('Pays', ''))
                 
-                # Pénalité forte si placement l'après-midi pour un pays Asie/Océanie
                 if any(p in pays_etu for p in PAYS_MATIN) and not is_am:
                     tz_score -= self.params.get('w_timezone', 10000)
-                    
-                # Pénalité forte si placement le matin pour un pays d'Amérique
                 elif any(p in pays_etu for p in PAYS_APREM) and is_am:
                     tz_score -= self.params.get('w_timezone', 10000)
 
-                # --- SCORE TUTEUR ---
                 t_score = 0
                 t_prev = slot['start'] - timedelta(minutes=self.duree); t_next = slot['end']
                 
@@ -386,7 +414,6 @@ class SchedulerEngine:
                     if slot['salle'] in jury_rooms[(tuteur, slot['jour'])]:
                         t_score += self.params['w_room']
                 
-                # Regroupement Demi-journée (Min 2)
                 cnt_t = jury_halfday_counts[tuteur][hd_key]
                 if cnt_t == 1: 
                     t_score += self.params['w_grouping'] * 2.5
@@ -398,8 +425,7 @@ class SchedulerEngine:
                 for cj in self.all_possible_jurys:
                     if cj == tuteur: continue
                     
-                    # RETIRÉ POUR ÉVITER LE BLOCAGE :
-                    # if charge_c[cj] >= self.target_cojury[cj]: continue
+                    # ATTENTION : La ligne 'continue' stricte a été retirée ici !
 
                     f_cj = self.filieres.get(cj)
                     if f_tut and f_cj and f_tut != f_cj: continue 
@@ -407,7 +433,6 @@ class SchedulerEngine:
                     if cj in busy_jurys[slot['key']]: continue
                     if not self.is_available(cj, slot['key']): continue
                     
-                    # --- SCORE CO-JURY ---
                     cj_score = 0
                     if t_prev in jury_times[cj]: cj_score += self.params['w_contiguity']
                     if t_next in jury_times[cj]: cj_score += self.params['w_contiguity']
@@ -425,12 +450,11 @@ class SchedulerEngine:
                     elif cnt_c == 0:
                         cj_score -= self.params['w_grouping'] * 1.5
                     
-                    # --- NOUVEAU : Pénalité si le quota est atteint ---
+                    # --- NOUVELLE RÈGLE ANTI-BLOCAGE ---
                     bal_score = (self.target_cojury[cj] - charge_c[cj]) * self.params['w_balance']
                     if charge_c[cj] >= self.target_cojury[cj]:
-                        bal_score -= 5000  # On préfère l'éviter, mais on ne l'interdit pas totalement
+                        bal_score -= 5000  # Pénalité forte au lieu d'un blocage 'continue'
                     
-                    # TOTAL INCLUANT LE FUSEAU HORAIRE
                     total = t_score + cj_score + bal_score + tz_score + random.uniform(0, self.params['w_random'])
                     if total > best_score: best_score = total; best_move = (slot, cj)
             
@@ -549,8 +573,7 @@ elif st.session_state.etape == 5:
     
     with st.expander("Paramètres avancés", expanded=False):
         c1, c2 = st.columns(2)
-        # NOUVEAU PARAMÈTRE : number_input pour permettre des milliers de simulations
-        n_iter = c1.number_input("Nombre de simulations (Itérations)", min_value=10, max_value=50000, value=1000, step=100)
+        n_iter = c1.number_input("Nombre de simulations (Itérations)", min_value=10, max_value=50000, value=2000, step=100)
         w_rand = c2.slider("Exploration (Aléatoire)", 0, 500, 100)
         c3, c4 = st.columns(2)
         w_cont = c3.slider("Poids Contiguïté (Slots collés)", 0, 5000, 2000)
@@ -568,7 +591,7 @@ elif st.session_state.etape == 5:
             "w_contiguity": w_cont, "w_balance": w_bal, 
             "w_day": 100, "w_room": w_room,
             "w_grouping": w_group,
-            "w_timezone": 10000  # Pénalité énorme pour forcer le respect du fuseau
+            "w_timezone": 10000 
         }
         eng = SchedulerEngine(
             st.session_state.etudiants, st.session_state.dates, st.session_state.nb_salles, st.session_state.duree, 
