@@ -418,9 +418,19 @@ class SchedulerEngine:
                     elif cnt_c == 0:
                         cj_score -= self.params['w_grouping'] * 1.5
                     
+                    # (Gardez le code existant juste au-dessus...)
+                    
                     bal_score = (self.target_cojury[cj] - charge_c[cj]) * self.params['w_balance']
                     
-                    # TOTAL INCLUANT LE FUSEAU HORAIRE
+                    # --- NOUVEAU CODE À AJOUTER ICI ---
+                    # Si le quota est atteint ou dépassé, on applique une forte pénalité
+                    # au lieu de bloquer strictement. C'est la solution de "dernier recours"
+                    # qui évite d'avoir des étudiants non placés !
+                    if charge_c[cj] >= self.target_cojury[cj]:
+                        bal_score -= 5000 
+                    # ----------------------------------
+
+                    # TOTAL INCLUANT LE FUSEAU HORAIRE (Déjà présent dans votre code)
                     total = t_score + cj_score + bal_score + tz_score + random.uniform(0, self.params['w_random'])
                     if total > best_score: best_score = total; best_move = (slot, cj)
             
