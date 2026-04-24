@@ -296,8 +296,14 @@ class SchedulerEngine:
         prog = st.progress(0); status = st.empty()
         n_iters = self.params['n_iterations']
         
+        # Optimisation : pour éviter de faire ramer l'interface si on fait 10000 boucles
+        update_freq = max(1, n_iters // 100) 
+        
         for i in range(n_iters):
-            prog.progress((i+1)/n_iters)
+            if i % update_freq == 0 or i == n_iters - 1:
+                prog.progress((i+1)/n_iters)
+                status.write(f"Simulation en cours... ({i+1} / {n_iters} générées. Calcul des meilleurs scores...)")
+                
             plan, fail, charges = self._solve_single_run()
             
             nb_places = len(plan)
@@ -392,7 +398,8 @@ class SchedulerEngine:
                 for cj in self.all_possible_jurys:
                     if cj == tuteur: continue
                     
-                    if charge_c[cj] >= self.target_cojury[cj]: continue
+                    # RETIRÉ POUR ÉVITER LE BLOCAGE :
+                    # if charge_c[cj] >= self.target_cojury[cj]: continue
 
                     f_cj = self.filieres.get(cj)
                     if f_tut and f_cj and f_tut != f_cj: continue 
@@ -418,19 +425,12 @@ class SchedulerEngine:
                     elif cnt_c == 0:
                         cj_score -= self.params['w_grouping'] * 1.5
                     
-                    # (Gardez le code existant juste au-dessus...)
-                    
+                    # --- NOUVEAU : Pénalité si le quota est atteint ---
                     bal_score = (self.target_cojury[cj] - charge_c[cj]) * self.params['w_balance']
-                    
-                    # --- NOUVEAU CODE À AJOUTER ICI ---
-                    # Si le quota est atteint ou dépassé, on applique une forte pénalité
-                    # au lieu de bloquer strictement. C'est la solution de "dernier recours"
-                    # qui évite d'avoir des étudiants non placés !
                     if charge_c[cj] >= self.target_cojury[cj]:
-                        bal_score -= 5000 
-                    # ----------------------------------
-
-                    # TOTAL INCLUANT LE FUSEAU HORAIRE (Déjà présent dans votre code)
+                        bal_score -= 5000  # On préfère l'éviter, mais on ne l'interdit pas totalement
+                    
+                    # TOTAL INCLUANT LE FUSEAU HORAIRE
                     total = t_score + cj_score + bal_score + tz_score + random.uniform(0, self.params['w_random'])
                     if total > best_score: best_score = total; best_move = (slot, cj)
             
@@ -549,7 +549,8 @@ elif st.session_state.etape == 5:
     
     with st.expander("Paramètres avancés", expanded=False):
         c1, c2 = st.columns(2)
-        n_iter = c1.slider("Itérations", 10, 200, 50)
+        # NOUVEAU PARAMÈTRE : number_input pour permettre des milliers de simulations
+        n_iter = c1.number_input("Nombre de simulations (Itérations)", min_value=10, max_value=50000, value=1000, step=100)
         w_rand = c2.slider("Exploration (Aléatoire)", 0, 500, 100)
         c3, c4 = st.columns(2)
         w_cont = c3.slider("Poids Contiguïté (Slots collés)", 0, 5000, 2000)
