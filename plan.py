@@ -9,14 +9,24 @@ from thefuzz import fuzz
 import re
 import random
 import unicodedata
-import time  # <-- NOUVEL IMPORT POUR LE CHRONOMÈTRE
+import time
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Planification Soutenances (Anti-Isolés)", layout="wide", page_icon="🎓")
+st.set_page_config(
+    page_title="Planification Soutenances (Anti-Isolés)",
+    layout="wide",
+    page_icon="🎓"
+)
 
 # --- FUSEAUX HORAIRES (CONTRAINTES GÉOGRAPHIQUES) ---
-PAYS_MATIN = ["AUSTRALIE", "INDONESIE", "JAPON", "CHINE", "VIETNAM", "SINGAPOUR", "INDE", "THAILANDE", "COREE", "NOUVELLE-ZELANDE"]
-PAYS_APREM = ["ETATS-UNIS", "MEXIQUE", "BRESIL", "CANADA", "ARGENTINE", "COLOMBIE", "PEROU", "CHILI", "QUEBEC", "USA"]
+PAYS_MATIN = [
+    "AUSTRALIE", "INDONESIE", "JAPON", "CHINE", "VIETNAM",
+    "SINGAPOUR", "INDE", "THAILANDE", "COREE", "NOUVELLE-ZELANDE"
+]
+PAYS_APREM = [
+    "ETATS-UNIS", "MEXIQUE", "BRESIL", "CANADA", "ARGENTINE",
+    "COLOMBIE", "PEROU", "CHILI", "QUEBEC", "USA"
+]
 
 # --- STYLES ---
 st.markdown("""
@@ -28,28 +38,67 @@ st.markdown("""
 
 # --- STATE ---
 DEFAULT_STATE = {
-    "etape": 1, "etudiants": [], "co_jurys": [], "dates": [],
-    "disponibilites": {}, "filieres": {}, "planning": [], "nb_salles": 2,
-    "duree": 50, "failed": [], "stats_charges": {}
+    "etape": 1,
+    "etudiants": [],
+    "co_jurys": [],
+    "dates": [],
+    "disponibilites": {},
+    "filieres": {},
+    "planning": [],
+    "nb_salles": 2,
+    "duree": 50,
+    "failed": [],
+    "stats_charges": {},
+    "student_unavailabilities": {}  # Stockage des jours d'indisponibilité étudiants
 }
+
 for key, value in DEFAULT_STATE.items():
-    if key not in st.session_state: st.session_state[key] = value
+    if key not in st.session_state:
+        st.session_state[key] = value
+
 
 # --- HELPER: Extraction Nom ---
 def extract_nom_only(fullname):
-    if not isinstance(fullname, str) or not fullname: return ""
+    if not isinstance(fullname, str) or not fullname:
+        return ""
     parts = fullname.strip().split()
     upper_parts = [p for p in parts if p.isupper() and len(p) > 1]
-    if upper_parts: return " ".join(upper_parts)
+    if upper_parts:
+        return " ".join(upper_parts)
     return parts[0] if parts else ""
 
-# --- EXPORT EXCEL ---
-def generate_excel_planning(planning_data, nb_salles):
+
+# --- DYNAMIC SLOTS GENERATOR (Pour Excel et Engine) ---
+def get_dynamic_slots_start_times(duree):
+    slots_matin = []
+    slots_aprem = []
+    
+    # Créneaux du matin : de 08:00 à 12:10
+    curr_matin = datetime.strptime("08:00", "%H:%M")
+    end_matin = datetime.strptime("12:10", "%H:%M")
+    while curr_matin + timedelta(minutes=duree) <= end_matin:
+        slots_matin.append(curr_matin.strftime('%H:%M'))
+        curr_matin += timedelta(minutes=duree)
+        
+    # Créneaux de l'après-midi : de 14:00 à 18:10
+    curr_aprem = datetime.strptime("14:00", "%H:%M")
+    end_aprem = datetime.strptime("18:10", "%H:%M")
+    while curr_aprem + timedelta(minutes=duree) <= end_aprem:
+        slots_aprem.append(curr_aprem.strftime('%H:%M'))
+        curr_aprem += timedelta(minutes=duree)
+        
+    return slots_matin, slots_aprem
+
+
+# --- EXPORT EXCEL DYNAMIQUE (DURÉE PRÈSE EN COMPTE) ---
+def generate_excel_planning(planning_data, nb_salles, duree):
     output = BytesIO()
-    if not planning_data: return output
+    if not planning_data:
+        return output
     df = pd.DataFrame(planning_data)
-    slots_matin = ["08:00", "08:50", "09:40", "10:30", "11:20", "12:10"]
-    slots_aprem = ["14:00", "14:50", "15:40", "16:30", "17:20"]
+    
+    # Récupération dynamique des heures de début selon la durée réelle
+    slots_matin, slots_aprem = get_dynamic_slots_start_times(duree)
     
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         workbook = writer.book
@@ -61,7 +110,7 @@ def generate_excel_planning(planning_data, nb_salles):
 
         try:
             unique_days = sorted(df['Jour'].unique(), key=lambda x: datetime.strptime(x.split(" ")[1], "%d/%m/%Y"))
-        except:
+        except Exception:
             unique_days = sorted(df['Jour'].unique())
 
         for jour in unique_days:
@@ -76,7 +125,7 @@ def generate_excel_planning(planning_data, nb_salles):
                 worksheet.write(1, col_offset, "Heure", fmt_header)
                 worksheet.write(1, col_offset + 1, "Etudiant", fmt_header)
                 worksheet.write(1, col_offset + 2, "Jury + Co-jury", fmt_header)
-                worksheet.set_column(col_offset, col_offset, 8)
+                worksheet.set_column(col_offset, col_offset, 12)
                 worksheet.set_column(col_offset + 1, col_offset + 1, 30)
                 worksheet.set_column(col_offset + 2, col_offset + 2, 30)
                 
@@ -118,18 +167,23 @@ def generate_excel_planning(planning_data, nb_salles):
                 col_offset += 4
     return output.getvalue()
 
+
 # --- IMPORTERS ---
 def clean_str(val):
-    if pd.isna(val) or str(val).lower() in ['nan', 'none', '']: return ""
+    if pd.isna(val) or str(val).lower() in ['nan', 'none', '']:
+        return ""
     val = str(val).replace('\n', ' ').replace('\r', '').strip()
     return " ".join(val.split())
 
+
 def normalize_text(text):
-    if not isinstance(text, str): return str(text)
+    if not isinstance(text, str):
+        return str(text)
     text = text.upper().strip()
     text = "".join(text.split())
     text = unicodedata.normalize('NFD', text).encode('ascii', 'ignore').decode("utf-8")
     return text
+
 
 def lire_fichier_robuste(uploaded_file):
     filename = uploaded_file.name.lower()
@@ -146,43 +200,66 @@ def lire_fichier_robuste(uploaded_file):
                 for sep in separators:
                     try:
                         df = pd.read_csv(StringIO(decoded), sep=sep, engine='python', quotechar='"', on_bad_lines='skip')
-                        if len(df.columns) > 1: return df, None
-                    except: continue
-            except: continue
+                        if len(df.columns) > 1:
+                            return df, None
+                    except Exception:
+                        continue
+            except Exception:
+                continue
         return None, "Impossible de lire le fichier."
-    except Exception as e: return None, f"Erreur technique : {str(e)}"
+    except Exception as e:
+        return None, f"Erreur technique : {str(e)}"
+
 
 def importer_etudiants(uploaded_file):
     df, error = lire_fichier_robuste(uploaded_file)
-    if error: return [], error
+    if error:
+        return [], error
     df.columns = [str(c).strip().replace('\xa0', ' ') for c in df.columns]
     col_map = {}
-    targets = {'nom': ['NOM','Nom'], 'prenom': ['PRENOM','Prénom'], 'tuteur': ['Enseignant référent (NOM Prénom)','Enseignant référent','Tuteur'], 'pays': ['Service d’accueil – Pays','Pays']}
+    targets = {
+        'nom': ['NOM', 'Nom'],
+        'prenom': ['PRENOM', 'Prénom'],
+        'tuteur': ['Enseignant référent (NOM Prénom)', 'Enseignant référent', 'Tuteur'],
+        'pays': ['Service d’accueil – Pays', 'Pays']
+    }
     for key, candidates in targets.items():
         for cand in candidates:
-            if cand in df.columns: col_map[key] = cand; break
-    raw_cols = list(df.columns); cols_norm = {normalize_text(c): c for c in raw_cols}
+            if cand in df.columns:
+                col_map[key] = cand
+                break
+    raw_cols = list(df.columns)
+    cols_norm = {normalize_text(c): c for c in raw_cols}
     if 'nom' not in col_map:
         for n, r in cols_norm.items(): 
-            if "NOM" in n and "PRENOM" not in n and "REFERENT" not in n and "ACCUEIL" not in n: col_map['nom'] = r; break
+            if "NOM" in n and "PRENOM" not in n and "REFERENT" not in n and "ACCUEIL" not in n:
+                col_map['nom'] = r
+                break
     if 'tuteur' not in col_map:
         for n, r in cols_norm.items():
-            if ("REFERENT" in n or "ENSEIGNANT" in n) and "ENTREPRISE" not in n: col_map['tuteur'] = r; break
+            if ("REFERENT" in n or "ENSEIGNANT" in n) and "ENTREPRISE" not in n:
+                col_map['tuteur'] = r
+                break
     missing = [k for k in ['nom', 'tuteur'] if k not in col_map]
-    if missing: return [], f"Colonnes introuvables : {missing}. Colonnes : {raw_cols}"
+    if missing:
+        return [], f"Colonnes introuvables : {missing}. Colonnes : {raw_cols}"
     etudiants = []
     for _, row in df.iterrows():
         n = clean_str(row.get(col_map.get('nom')))
         p = clean_str(row.get(col_map.get('prenom'), ''))
         t = clean_str(row.get(col_map.get('tuteur')))
         y = clean_str(row.get(col_map.get('pays'), ''))
-        if len(t) > 60 or len(n) > 60: continue 
-        if n and t and t.lower() != 'nan': etudiants.append({"Prénom": p, "Nom": n, "Pays": y, "Tuteur": t})
+        if len(t) > 60 or len(n) > 60:
+            continue 
+        if n and t and t.lower() != 'nan':
+            etudiants.append({"Prénom": p, "Nom": n, "Pays": y, "Tuteur": t})
     return etudiants, None
+
 
 def importer_disponibilites(uploaded_file, tuteurs_connus, co_jurys_connus, horaires_config):
     df, error = lire_fichier_robuste(uploaded_file)
-    if error: return [], [], [], [error]
+    if error:
+        return [], [], [], [error]
     
     personnes_reconnues = {p for p in (tuteurs_connus + co_jurys_connus) if p and str(p).lower() != 'nan'}
     date_cols_map = {} 
@@ -193,9 +270,12 @@ def importer_disponibilites(uploaded_file, tuteurs_connus, co_jurys_connus, hora
             for j_app, c_list in horaires_config.items():
                 if d_csv in j_app:
                     for c in c_list:
-                        if c.startswith(h_csv): date_cols_map[col] = f"{j_app} | {c}"; break
+                        if c.startswith(h_csv):
+                            date_cols_map[col] = f"{j_app} | {c}"
+                            break
     
-    if not date_cols_map: return {}, [], {}, ["Pas de colonnes dates valides."]
+    if not date_cols_map:
+        return {}, [], {}, ["Pas de colonnes dates valides."]
 
     col_filiere = None
     for c in df.columns:
@@ -203,50 +283,76 @@ def importer_disponibilites(uploaded_file, tuteurs_connus, co_jurys_connus, hora
             col_filiere = c
             break
 
-    dispos_data = {}; treated = set(); logs = []; filieres_data = {}
+    dispos_data = {}
+    treated = set()
+    logs = []
+    filieres_data = {}
     col_nom = df.columns[0]
     
     for _, row in df.iterrows():
         nom_brut = clean_str(row[col_nom])
-        if not nom_brut: continue
+        if not nom_brut:
+            continue
         best_match, best_score = None, 0
         for p in personnes_reconnues:
             score = fuzz.token_sort_ratio(nom_brut.lower(), p.lower())
-            if score > best_score: best_score, best_match = score, p
+            if score > best_score:
+                best_score = score
+                best_match = p
             
         if best_score >= 60:
             final_name = best_match
-            if final_name not in dispos_data: dispos_data[final_name] = {}
+            if final_name not in dispos_data:
+                dispos_data[final_name] = {}
             if col_filiere:
                 filiere_val = clean_str(row.get(col_filiere, "")).upper()
-                if filiere_val: filieres_data[final_name] = filiere_val
+                if filiere_val:
+                    filieres_data[final_name] = filiere_val
             for col_csv, key_app in date_cols_map.items():
                 val = row.get(col_csv, 0)
                 try:
                     is_open = bool(int(float(val))) if pd.notna(val) else False
                     dispos_data[final_name][key_app] = is_open
-                except: pass
+                except Exception:
+                    pass
             treated.add(final_name)
-        else: logs.append(f"Ignoré: {nom_brut}")
+        else:
+            logs.append(f"Ignoré: {nom_brut}")
         
     return dispos_data, list(treated), filieres_data, logs
 
+
 # --- MOTEUR ALGORITHMIQUE ---
 class SchedulerEngine:
-    def __init__(self, etudiants, dates, nb_salles, duree, dispos, filieres, co_jurys_pool, params):
-        self.etudiants = etudiants; self.nb_salles = nb_salles; self.duree = duree
-        self.dispos = dispos; self.filieres = filieres; self.dates = dates
-        self.co_jurys_pool = list(set(co_jurys_pool)); self.params = params
+    def __init__(self, etudiants, dates, nb_salles, duree, dispos, filieres, co_jurys_pool, params, student_unavailabilities=None):
+        self.etudiants = etudiants
+        self.nb_salles = nb_salles
+        self.duree = duree
+        self.dispos = dispos
+        self.filieres = filieres
+        self.dates = dates
+        self.co_jurys_pool = list(set(co_jurys_pool))
+        self.params = params
+        self.student_unavailabilities = student_unavailabilities or {}
         self.slots = self._generate_slots()
         
         self.target_cojury = defaultdict(int)
-        for e in self.etudiants: self.target_cojury[e['Tuteur']] += 1
+        for e in self.etudiants:
+            self.target_cojury[e['Tuteur']] += 1
         
         self.tuteurs_actifs = list(set(e['Tuteur'] for e in etudiants if e['Tuteur']))
         self.all_possible_jurys = list(set(self.co_jurys_pool + self.tuteurs_actifs))
+        
+        # OPTIMISATION MAJEURE : Pré-calcul des disponibilités des co-jurys par créneau
+        self.available_jurys_by_slot = defaultdict(list)
+        for slot in self.slots:
+            for cj in self.all_possible_jurys:
+                if self.is_available(cj, slot['key']):
+                    self.available_jurys_by_slot[slot['key']].append(cj)
 
     def _generate_slots(self):
-        slots = []; slot_id = 0
+        slots = []
+        slot_id = 0
         for d in self.dates:
             d_str = d.strftime("%A %d/%m/%Y")
             for period in [("08:00", "12:10"), ("14:00", "18:10")]:
@@ -261,17 +367,24 @@ class SchedulerEngine:
                         for s in range(1, self.nb_salles + 1):
                             is_am = curr.hour < 13
                             slots.append({
-                                "id": slot_id, "key": key, "jour": d_str, "heure": h_str, 
-                                "salle": f"Salle {s}", "start": curr, "end": fin,
+                                "id": slot_id,
+                                "key": key,
+                                "jour": d_str,
+                                "heure": h_str, 
+                                "salle": f"Salle {s}",
+                                "start": curr,
+                                "end": fin,
                                 "half_day_key": (d_str, 'AM' if is_am else 'PM')
                             })
                             slot_id += 1
                         curr = fin
-                except: continue
+                except Exception:
+                    continue
         return slots
 
     def is_available(self, person, slot_key):
-        if person not in self.dispos: return True 
+        if person not in self.dispos:
+            return True 
         return self.dispos[person].get(slot_key, False)
         
     def _count_orphans(self, planning):
@@ -285,7 +398,8 @@ class SchedulerEngine:
         orphans = sum(1 for c in counts.values() if c == 1)
         orphans_by_prof = defaultdict(int)
         for (prof, _), cnt in counts.items():
-            if cnt == 1: orphans_by_prof[prof] += 1
+            if cnt == 1:
+                orphans_by_prof[prof] += 1
             
         return orphans, orphans_by_prof
 
@@ -294,14 +408,15 @@ class SchedulerEngine:
         best_score = (-1, -float('inf'), -float('inf'))
         best_scalar = -float('inf')
         
-        # --- UI ELEMENTS POUR LE CHRONO ET LE GRAPHIQUE ---
         prog = st.progress(0)
         status = st.empty()
         chart_container = st.empty()
         
         n_iters = self.params['n_iterations']
-        # Limiter les rafraîchissements pour ne pas faire ramer l'application
-        update_freq = max(1, n_iters // 100) 
+        update_freq = max(1, n_iters // 100)
+        
+        # Optimisation : On ne redessine le graphique qu'à 5% d'intervalle pour éviter la latence Streamlit
+        chart_update_freq = max(1, n_iters // 20) 
         
         start_time = time.time()
         score_history = []
@@ -311,12 +426,9 @@ class SchedulerEngine:
             
             nb_places = len(plan)
             nb_orphans, orphans_details = self._count_orphans(plan)
-            imb = sum(abs(c['tuteur']-c['cojury']) for c in charges.values())
+            imb = sum(abs(c['tuteur'] - c['cojury']) for c in charges.values())
             
             current_score = (nb_places, -nb_orphans, -imb)
-            
-            # --- CALCUL DU SCORE SCALAIRE POUR LE GRAPHIQUE ---
-            # Placement = +1000 pts | Orphelin = -10 pts | Déséquilibre = -1 pt
             scalar_score = (nb_places * 1000) - (nb_orphans * 10) - imb
             
             if current_score > best_score: 
@@ -326,11 +438,9 @@ class SchedulerEngine:
                 
             score_history.append(best_scalar)
             
-            # --- MISE À JOUR DE L'INTERFACE (ETA + GRAPHIQUE) ---
+            # Mise à jour rapide de la barre de progression (ETA)
             if i % update_freq == 0 or i == n_iters - 1:
-                prog.progress((i+1)/n_iters)
-                
-                # Calcul ETA (Temps restant estimé)
+                prog.progress((i + 1) / n_iters)
                 elapsed = time.time() - start_time
                 if i > 0:
                     time_per_iter = elapsed / i
@@ -341,22 +451,26 @@ class SchedulerEngine:
                     eta_str = "Calcul en cours..."
                 
                 status.info(f"⏳ **Simulation :** {i+1} / {n_iters} | ⏱️ **Temps restant :** {eta_str}")
-                
-                # Affichage du graphique
+            
+            # Mise à jour plus rare du graphique (gros gain de fluidité UI)
+            if i % chart_update_freq == 0 or i == n_iters - 1:
                 df_history = pd.DataFrame(score_history, columns=["Évolution du Meilleur Score"])
                 chart_container.line_chart(df_history, height=200)
                 
-        # Fin de la boucle
         duree_totale = int(time.time() - start_time)
         status.success(f"✅ **Optimisation terminée** en {duree_totale} secondes !")
         
         return best_sol
 
     def _solve_single_run(self):
-        planning = []; unassigned = []
-        occupied_slots = set(); busy_jurys = defaultdict(set)
-        charge_t = defaultdict(int); charge_c = defaultdict(int)
-        jury_times = defaultdict(set); jury_days = defaultdict(set)
+        planning = []
+        unassigned = []
+        occupied_slots = set()
+        busy_jurys = defaultdict(set)
+        charge_t = defaultdict(int)
+        charge_c = defaultdict(int)
+        jury_times = defaultdict(set)
+        jury_days = defaultdict(set)
         jury_rooms = defaultdict(set)
         
         jury_halfday_counts = defaultdict(lambda: defaultdict(int))
@@ -379,18 +493,34 @@ class SchedulerEngine:
         for _, etu in student_queue:
             tuteur = etu['Tuteur']
             f_tut = self.filieres.get(tuteur)
-            best_move = None; best_score = -float('inf')
+            best_move = None
+            best_score = -float('inf')
             
-            slots_shuffled = self.slots.copy(); random.shuffle(slots_shuffled)
+            # Récupération des indisponibilités de cet étudiant
+            student_fullname = f"{etu['Prénom']} {etu['Nom']}"
+            unavail_days = self.student_unavailabilities.get(student_fullname, [])
+            
+            slots_shuffled = self.slots.copy()
+            random.shuffle(slots_shuffled)
             valid_slots = []
             
             for slot in slots_shuffled:
-                if slot['id'] in occupied_slots: continue
-                if tuteur in busy_jurys[slot['key']]: continue
-                if not self.is_available(tuteur, slot['key']): continue
+                if slot['id'] in occupied_slots:
+                    continue
+                if tuteur in busy_jurys[slot['key']]:
+                    continue
+                if not self.is_available(tuteur, slot['key']):
+                    continue
+                    
+                # CONTRAINTE AJOUTÉE : L'étudiant ne doit pas être indisponible ce jour-là
+                if slot['jour'] in unavail_days:
+                    continue
+                    
                 valid_slots.append(slot)
                 
-            if not valid_slots: unassigned.append(etu); continue
+            if not valid_slots:
+                unassigned.append(etu)
+                continue
             
             for slot in valid_slots:
                 hd_key = slot['half_day_key']
@@ -399,17 +529,27 @@ class SchedulerEngine:
                 tz_score = 0
                 pays_etu = normalize_text(etu.get('Pays', ''))
                 
-                if any(p in pays_etu for p in PAYS_MATIN) and not is_am:
-                    tz_score -= self.params.get('w_timezone', 10000)
-                elif any(p in pays_etu for p in PAYS_APREM) and is_am:
-                    tz_score -= self.params.get('w_timezone', 10000)
+                # Gestion fine des décalages horaires (Mexique / Amériques prioritaires en fin d'après-midi, >= 16h)
+                if any(p in pays_etu for p in PAYS_MATIN):
+                    if not is_am:
+                        tz_score -= self.params.get('w_timezone', 10000)
+                elif any(p in pays_etu for p in PAYS_APREM):
+                    if is_am:
+                        tz_score -= self.params.get('w_timezone', 10000)
+                    elif slot['start'].hour < 16:
+                        # Pénalité substantielle pour éviter la tranche 14h-16h (trop tôt là-bas)
+                        tz_score -= 8000  
 
                 t_score = 0
-                t_prev = slot['start'] - timedelta(minutes=self.duree); t_next = slot['end']
+                t_prev = slot['start'] - timedelta(minutes=self.duree)
+                t_next = slot['end']
                 
-                if t_prev in jury_times[tuteur]: t_score += self.params['w_contiguity']
-                if t_next in jury_times[tuteur]: t_score += self.params['w_contiguity']
-                if slot['jour'] in jury_days[tuteur]: t_score += self.params['w_day']
+                if t_prev in jury_times[tuteur]:
+                    t_score += self.params['w_contiguity']
+                if t_next in jury_times[tuteur]:
+                    t_score += self.params['w_contiguity']
+                if slot['jour'] in jury_days[tuteur]:
+                    t_score += self.params['w_day']
                 if (tuteur, slot['jour']) in jury_rooms:
                     if slot['salle'] in jury_rooms[(tuteur, slot['jour'])]:
                         t_score += self.params['w_room']
@@ -422,21 +562,25 @@ class SchedulerEngine:
                 elif cnt_t == 0:
                     t_score -= self.params['w_grouping'] * 1.5 
 
-                for cj in self.all_possible_jurys:
-                    if cj == tuteur: continue
+                # OPTIMISATION : On boucle uniquement sur les jurys réellement disponibles sur ce créneau
+                for cj in self.available_jurys_by_slot[slot['key']]:
+                    if cj == tuteur:
+                        continue
                     
-                    # ATTENTION : La ligne 'continue' stricte a été retirée ici !
-
                     f_cj = self.filieres.get(cj)
-                    if f_tut and f_cj and f_tut != f_cj: continue 
+                    if f_tut and f_cj and f_tut != f_cj:
+                        continue 
 
-                    if cj in busy_jurys[slot['key']]: continue
-                    if not self.is_available(cj, slot['key']): continue
+                    if cj in busy_jurys[slot['key']]:
+                        continue
                     
                     cj_score = 0
-                    if t_prev in jury_times[cj]: cj_score += self.params['w_contiguity']
-                    if t_next in jury_times[cj]: cj_score += self.params['w_contiguity']
-                    if slot['jour'] in jury_days[cj]: cj_score += self.params['w_day']
+                    if t_prev in jury_times[cj]:
+                        cj_score += self.params['w_contiguity']
+                    if t_next in jury_times[cj]:
+                        cj_score += self.params['w_contiguity']
+                    if slot['jour'] in jury_days[cj]:
+                        cj_score += self.params['w_day']
                     
                     if (cj, slot['jour']) in jury_rooms:
                         if slot['salle'] in jury_rooms[(cj, slot['jour'])]:
@@ -450,19 +594,31 @@ class SchedulerEngine:
                     elif cnt_c == 0:
                         cj_score -= self.params['w_grouping'] * 1.5
                     
-                    # --- NOUVELLE RÈGLE ANTI-BLOCAGE ---
                     bal_score = (self.target_cojury[cj] - charge_c[cj]) * self.params['w_balance']
                     if charge_c[cj] >= self.target_cojury[cj]:
-                        bal_score -= 5000  # Pénalité forte au lieu d'un blocage 'continue'
+                        bal_score -= 5000
                     
                     total = t_score + cj_score + bal_score + tz_score + random.uniform(0, self.params['w_random'])
-                    if total > best_score: best_score = total; best_move = (slot, cj)
+                    if total > best_score:
+                        best_score = total
+                        best_move = (slot, cj)
             
             if best_move:
                 slot, best_cj = best_move
-                planning.append({"Étudiant": f"{etu['Prénom']} {etu['Nom']}", "Pays": etu['Pays'], "Tuteur": tuteur, "Co-jury": best_cj, "Jour": slot['jour'], "Heure": slot['heure'], "Salle": slot['salle'], "Début": slot['start'], "Fin": slot['end']})
+                planning.append({
+                    "Étudiant": f"{etu['Prénom']} {etu['Nom']}",
+                    "Pays": etu['Pays'],
+                    "Tuteur": tuteur,
+                    "Co-jury": best_cj,
+                    "Jour": slot['jour'],
+                    "Heure": slot['heure'],
+                    "Salle": slot['salle'],
+                    "Début": slot['start'],
+                    "Fin": slot['end']
+                })
                 occupied_slots.add(slot['id'])
-                busy_jurys[slot['key']].add(tuteur); busy_jurys[slot['key']].add(best_cj)
+                busy_jurys[slot['key']].add(tuteur)
+                busy_jurys[slot['key']].add(best_cj)
                 
                 hd_k = slot['half_day_key']
                 jury_halfday_counts[tuteur][hd_k] += 1
@@ -472,10 +628,12 @@ class SchedulerEngine:
                     jury_times[p].add(slot['start'])
                     jury_days[p].add(slot['jour'])
                     jury_rooms[(p, slot['jour'])].add(slot['salle'])
-                charge_t[tuteur] += 1; charge_c[best_cj] += 1
-            else: unassigned.append(etu)
+                charge_t[tuteur] += 1
+                charge_c[best_cj] += 1
+            else:
+                unassigned.append(etu)
             
-        final_charges = defaultdict(lambda: {'tuteur':0, 'cojury':0})
+        final_charges = defaultdict(lambda: {'tuteur': 0, 'cojury': 0})
         all_people = set(self.target_cojury.keys()) | set(charge_t.keys()) | set(charge_c.keys())
         for p in all_people:
              final_charges[p]['tuteur'] = charge_t[p]
@@ -483,17 +641,32 @@ class SchedulerEngine:
              
         return planning, unassigned, final_charges
 
+
 # --- INTERFACE UTILISATEUR (SIDEBAR) ---
 with st.sidebar:
     st.header("🧭 Navigation")
-    steps = {1: "1. Étudiants", 2: "2. Paramètres", 3: "3. Dates", 4: "4. Import Dispos", 5: "5. Génération"}
-    sel = st.radio("Aller à :", list(steps.keys()), format_func=lambda x: steps[x], index=st.session_state.etape -1)
-    if sel != st.session_state.etape: st.session_state.etape = sel; st.rerun()
+    steps = {
+        1: "1. Étudiants",
+        2: "2. Paramètres",
+        3: "3. Dates & Indispos",
+        4: "4. Import Dispos",
+        5: "5. Génération"
+    }
+    sel = st.radio(
+        "Aller à :",
+        list(steps.keys()),
+        format_func=lambda x: steps[x],
+        index=st.session_state.etape - 1
+    )
+    if sel != st.session_state.etape:
+        st.session_state.etape = sel
+        st.rerun()
     st.divider()
     st.write(f"Étudiants : {len(st.session_state.etudiants)}")
     st.write(f"Dispos Tuteurs : {len(st.session_state.disponibilites)}")
     if 'filieres' in st.session_state:
         st.write(f"Filières : {len(set(st.session_state.filieres.values()))}")
+
 
 # --- ETAPE 1 : IMPORT ETUDIANTS ---
 if st.session_state.etape == 1:
@@ -501,13 +674,18 @@ if st.session_state.etape == 1:
     f = st.file_uploader("Fichier Étudiants (Excel/CSV)", type=['xlsx', 'csv'])
     if f:
         data, msg = importer_etudiants(f)
-        if not data: st.error(msg)
+        if not data:
+            st.error(msg)
         else:
             st.session_state.etudiants = data
-            if msg: st.warning(msg)
+            if msg:
+                st.warning(msg)
             st.success(f"{len(data)} étudiants importés.")
             st.dataframe(pd.DataFrame(data).head())
-            if st.button("Suivant"): st.session_state.etape = 2; st.rerun()
+            if st.button("Suivant"):
+                st.session_state.etape = 2
+                st.rerun()
+
 
 # --- ETAPE 2 : PARAMETRES ---
 elif st.session_state.etape == 2:
@@ -515,25 +693,82 @@ elif st.session_state.etape == 2:
     c1, c2 = st.columns(2)
     st.session_state.nb_salles = c1.number_input("Nombre de Salles", 1, 20, st.session_state.nb_salles)
     st.session_state.duree = c2.number_input("Durée soutenance (min)", 30, 120, st.session_state.duree)
-    if st.button("Suivant"): st.session_state.etape = 3; st.rerun()
+    if st.button("Suivant"):
+        st.session_state.etape = 3
+        st.rerun()
 
-# --- ETAPE 3 : DATES ---
+
+# --- ETAPE 3 : DATES & INDISPONIBILITÉS ÉTUDIANTS ---
 elif st.session_state.etape == 3:
     st.title("3. Dates & Co-jurys")
-    nb = st.number_input("Nombre de Jours", 1, 5, max(3, len(st.session_state.dates)))
-    ds = []; cols = st.columns(4)
+    
+    nb = st.number_input("Nombre de Jours", 1, 10, max(3, len(st.session_state.dates)))
+    ds = []
+    cols = st.columns(4)
     for i in range(nb):
-        d_def = st.session_state.dates[i] if i < len(st.session_state.dates) else datetime(2026, 1, 26).date() + timedelta(days=i)
-        ds.append(cols[i%4].date_input(f"Jour {i+1}", d_def))
+        d_def = (
+            st.session_state.dates[i]
+            if i < len(st.session_state.dates)
+            else datetime(2026, 1, 26).date() + timedelta(days=i)
+        )
+        ds.append(cols[i % 4].date_input(f"Jour {i + 1}", d_def))
     st.session_state.dates = ds
     
     st.subheader("Co-jurys supplémentaires")
-    st.info("ℹ️ Note : Avec la règle de parité stricte (N Cojury = N Tuteur), les co-jurys externes sans étudiants seront peu sollicités (Quota = 0).")
+    st.info("ℹ️ Note : Avec la règle de parité stricte, les co-jurys externes sans étudiants seront peu sollicités.")
     c_new = st.text_input("Ajouter un nom")
-    if c_new and c_new not in st.session_state.co_jurys: st.session_state.co_jurys.append(c_new)
-    if st.session_state.co_jurys: st.write(st.session_state.co_jurys)
+    if c_new and c_new not in st.session_state.co_jurys:
+        st.session_state.co_jurys.append(c_new)
+    if st.session_state.co_jurys:
+        st.write(st.session_state.co_jurys)
+        
+    st.divider()
     
-    if st.button("Suivant"): st.session_state.etape = 4; st.rerun()
+    # --- MODULE DE GESTION DES INDISPONIBILITÉS ÉTUDIANTS ---
+    st.subheader("🚫 Indisponibilités des Étudiants")
+    st.write("Indiquez si certains étudiants ne sont pas disponibles certains jours pour bloquer la planification correspondante.")
+    
+    if not st.session_state.etudiants:
+        st.warning("⚠️ Veuillez d'abord importer des étudiants à l'étape 1.")
+    elif not st.session_state.dates:
+        st.warning("⚠️ Veuillez d'abord configurer au moins une date ci-dessus.")
+    else:
+        # Nettoyage des indisponibilités enregistrées si les dates configurées ont changé
+        active_date_strings = [d.strftime("%A %d/%m/%Y") for d in st.session_state.dates]
+        for student in list(st.session_state.student_unavailabilities.keys()):
+            st.session_state.student_unavailabilities[student] = [
+                day for day in st.session_state.student_unavailabilities[student]
+                if day in active_date_strings
+            ]
+            
+        with st.expander("Gérer les indisponibilités par étudiant (cliquez pour dérouler)", expanded=True):
+            student_list = [f"{e['Prénom']} {e['Nom']}" for e in st.session_state.etudiants]
+            selected_student = st.selectbox("Sélectionnez l'étudiant à restreindre :", student_list)
+            
+            if selected_student:
+                current_unavail = st.session_state.student_unavailabilities.get(selected_student, [])
+                new_unavail = st.multiselect(
+                    f"Sélectionnez le(s) jour(s) d'indisponibilité pour {selected_student} :",
+                    options=active_date_strings,
+                    default=[day for day in current_unavail if day in active_date_strings]
+                )
+                st.session_state.student_unavailabilities[selected_student] = new_unavail
+        
+        # Affichage d'un tableau récapitulatif
+        active_unavail_data = [
+            {"Étudiant": k, "Jours bloqués": ", ".join(v)}
+            for k, v in st.session_state.student_unavailabilities.items()
+            if v
+        ]
+        if active_unavail_data:
+            st.write("**Récapitulatif des blocages étudiants enregistrés :**")
+            st.dataframe(pd.DataFrame(active_unavail_data), use_container_width=True, hide_index=True)
+
+    st.divider()
+    if st.button("Suivant"):
+        st.session_state.etape = 4
+        st.rerun()
+
 
 # --- ETAPE 4 : DISPONIBILITES ---
 elif st.session_state.etape == 4:
@@ -542,7 +777,9 @@ elif st.session_state.etape == 4:
     
     eng = SchedulerEngine([], st.session_state.dates, 1, st.session_state.duree, {}, {}, [], {})
     mapping_config = defaultdict(list)
-    for s in eng.slots: k = s['key'].split(" | "); mapping_config[k[0]].append(k[1])
+    for s in eng.slots:
+        k = s['key'].split(" | ")
+        mapping_config[k[0]].append(k[1])
     
     f = st.file_uploader("Fichier Disponibilités", type=['xlsx', 'csv'])
     if f:
@@ -562,10 +799,15 @@ elif st.session_state.etape == 4:
                 st.warning("⚠️ Aucune filière détectée (vérifiez la colonne 'FILIERE').")
             
             with st.expander("Logs d'import"): 
-                for l in logs: st.write(l)
-        else: st.error("Erreur lors de la lecture du fichier.")
+                for l in logs:
+                    st.write(l)
+        else:
+            st.error("Erreur lors de la lecture du fichier.")
         
-    if st.button("Suivant"): st.session_state.etape = 5; st.rerun()
+    if st.button("Suivant"):
+        st.session_state.etape = 5
+        st.rerun()
+
 
 # --- ETAPE 5 : GENERATION & BILAN ---
 elif st.session_state.etape == 5:
@@ -583,19 +825,31 @@ elif st.session_state.etape == 5:
         w_bal = c5.slider("Poids Équilibre", 0, 2000, 500)
         w_room = c6.slider("Poids Stabilité Salle", 0, 5000, 3000)
     
-    st.info("ℹ️ Règle active : Les étudiants en Asie/Océanie seront planifiés le matin, ceux aux Amériques l'après-midi.")
+    st.info("ℹ️ Règle active : Les étudiants en Asie/Océanie sont planifiés le matin. Ceux aux Amériques (ex: Mexique, USA) sont ciblés en fin d'après-midi (après 16h) pour respecter le décalage horaire.")
 
     if st.button("Lancer la planification", type="primary"):
         params = {
-            "n_iterations": n_iter, "w_random": w_rand, 
-            "w_contiguity": w_cont, "w_balance": w_bal, 
-            "w_day": 100, "w_room": w_room,
+            "n_iterations": n_iter,
+            "w_random": w_rand, 
+            "w_contiguity": w_cont,
+            "w_balance": w_bal, 
+            "w_day": 100,
+            "w_room": w_room,
             "w_grouping": w_group,
             "w_timezone": 10000 
         }
+        
+        # Transmission des indisponibilités étudiants au moteur
         eng = SchedulerEngine(
-            st.session_state.etudiants, st.session_state.dates, st.session_state.nb_salles, st.session_state.duree, 
-            st.session_state.disponibilites, st.session_state.filieres, st.session_state.co_jurys, params
+            st.session_state.etudiants,
+            st.session_state.dates,
+            st.session_state.nb_salles,
+            st.session_state.duree, 
+            st.session_state.disponibilites,
+            st.session_state.filieres,
+            st.session_state.co_jurys,
+            params,
+            student_unavailabilities=st.session_state.student_unavailabilities
         )
         plan, fail, charges, orphans = eng.run_optimization()
         st.session_state.planning = plan
@@ -621,10 +875,12 @@ elif st.session_state.etape == 5:
             
             all_profs = set(charges.keys())
             for e in st.session_state.etudiants: 
-                if e['Tuteur']: all_profs.add(e['Tuteur'])
+                if e['Tuteur']:
+                    all_profs.add(e['Tuteur'])
             
             for p in sorted(list(all_profs)):
-                if not p: continue
+                if not p:
+                    continue
                 c_t = charges[p]['tuteur']
                 c_c = charges[p]['cojury']
                 c_orph = orphans_map.get(p, 0)
@@ -668,8 +924,20 @@ elif st.session_state.etape == 5:
                     st.warning("⚠️ Les lignes Orphelins jaunes indiquent un enseignant qui vient pour une seule soutenance sur une demi-journée.")
 
         st.divider()
-        excel_data = generate_excel_planning(st.session_state.planning, st.session_state.nb_salles)
-        st.download_button("📥 Télécharger le Planning Complet (.xlsx)", excel_data, "Planning_Soutenances.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+        
+        # Appel de la génération Excel dynamique avec la durée réelle de l'état
+        excel_data = generate_excel_planning(
+            st.session_state.planning,
+            st.session_state.nb_salles,
+            st.session_state.duree
+        )
+        st.download_button(
+            "📥 Télécharger le Planning Complet (.xlsx)",
+            excel_data,
+            "Planning_Soutenances.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary"
+        )
 
         tab1, tab2, tab3 = st.tabs(["📋 Liste Détaillée", "📅 Diagramme de Gantt", "❌ Échecs éventuels"])
         
@@ -680,8 +948,22 @@ elif st.session_state.etape == 5:
             if not pd.DataFrame(st.session_state.planning).empty:
                 df_g = []
                 for x in st.session_state.planning:
-                    df_g.append({"Enseignant": x['Tuteur'], "Role": "Tuteur", "Etudiant": x['Étudiant'], "Jour": x['Jour'], "Start": datetime(2000,1,1,x['Début'].hour, x['Début'].minute), "End": datetime(2000,1,1,x['Fin'].hour, x['Fin'].minute)})
-                    df_g.append({"Enseignant": x['Co-jury'], "Role": "Co-jury", "Etudiant": x['Étudiant'], "Jour": x['Jour'], "Start": datetime(2000,1,1,x['Début'].hour, x['Début'].minute), "End": datetime(2000,1,1,x['Fin'].hour, x['Fin'].minute)})
+                    df_g.append({
+                        "Enseignant": x['Tuteur'],
+                        "Role": "Tuteur",
+                        "Etudiant": x['Étudiant'],
+                        "Jour": x['Jour'],
+                        "Start": datetime(2000, 1, 1, x['Début'].hour, x['Début'].minute),
+                        "End": datetime(2000, 1, 1, x['Fin'].hour, x['Fin'].minute)
+                    })
+                    df_g.append({
+                        "Enseignant": x['Co-jury'],
+                        "Role": "Co-jury",
+                        "Etudiant": x['Étudiant'],
+                        "Jour": x['Jour'],
+                        "Start": datetime(2000, 1, 1, x['Début'].hour, x['Début'].minute),
+                        "End": datetime(2000, 1, 1, x['Fin'].hour, x['Fin'].minute)
+                    })
                 
                 if st.session_state.disponibilites:
                     slots_ref = []
@@ -697,12 +979,14 @@ elif st.session_state.etape == 5:
                                     h_str = f"{curr.strftime('%H:%M')} - {fin.strftime('%H:%M')}"
                                     key = f"{d_str} | {h_str}"
                                     slots_ref.append({
-                                        "key": key, "jour": d_str,
-                                        "start": datetime(2000,1,1,curr.hour, curr.minute),
-                                        "end": datetime(2000,1,1,fin.hour, fin.minute)
+                                        "key": key,
+                                        "jour": d_str,
+                                        "start": datetime(2000, 1, 1, curr.hour, curr.minute),
+                                        "end": datetime(2000, 1, 1, fin.hour, fin.minute)
                                     })
                                     curr = fin
-                            except: continue
+                            except Exception:
+                                continue
                     
                     all_p_gantt = set(x['Enseignant'] for x in df_g)
                     for p in all_p_gantt:
@@ -721,15 +1005,21 @@ elif st.session_state.etape == 5:
 
                 df_viz = pd.DataFrame(df_g).sort_values("Enseignant")
                 
-                fig = px.timeline(df_viz, x_start="Start", x_end="End", y="Enseignant", color="Role", 
-                                  facet_col="Jour", 
-                                  hover_data={"Etudiant": True, "Role": True},
-                                  height=max(400, len(all_p_gantt)*35), 
-                                  color_discrete_map={
-                                      "Tuteur": "#2E86C1", 
-                                      "Co-jury": "#28B463", 
-                                      "Indisponible": "rgba(255, 0, 0, 0.15)"
-                                  })
+                fig = px.timeline(
+                    df_viz,
+                    x_start="Start",
+                    x_end="End",
+                    y="Enseignant",
+                    color="Role", 
+                    facet_col="Jour", 
+                    hover_data={"Etudiant": True, "Role": True},
+                    height=max(400, len(all_p_gantt) * 35), 
+                    color_discrete_map={
+                        "Tuteur": "#2E86C1", 
+                        "Co-jury": "#28B463", 
+                        "Indisponible": "rgba(255, 0, 0, 0.15)"
+                    }
+                )
                 
                 fig.update_xaxes(tickformat="%H:%M")
                 fig.update_yaxes(autorange="reversed")
